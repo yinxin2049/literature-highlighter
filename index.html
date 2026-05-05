@@ -666,7 +666,7 @@
           <label style="flex:1">字号</label>
           <span id="subFontSizeVal" style="color:#6e6e73;width:36px;text-align:right">28</span>
         </div>
-        <input type="range" id="subFontSize" min="14" max="72" value="28">
+        <input type="range" id="subFontSize" min="14" max="216" value="28">
       </div>
       <div class="field-row" style="margin-bottom:6px">
         <label style="flex:1;color:#6e6e73">加粗</label>
@@ -2076,7 +2076,7 @@ boxCanvas.addEventListener('mousemove', e => {
     const newDiag = Math.hypot(newMovingX - anchorX, newMovingY - anchorY);
     let scale = newDiag / origDiag;
     scale = Math.max(0.25, Math.min(4, scale));
-    const newFontSize = Math.max(8, Math.min(200, Math.round(subInitFontSize * scale)));
+    const newFontSize = Math.max(8, Math.min(216, Math.round(subInitFontSize * scale)));
     STATE.subtitleFontSize = newFontSize;
     // 同步右侧 UI
     const fsEl = document.getElementById('subFontSize');
