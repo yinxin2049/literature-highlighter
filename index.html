@@ -1,0 +1,4707 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>文献划线工具 · Literature Highlighter</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f5f7; color: #1d1d1f; }
+  body { display: flex; flex-direction: column; }
+
+  header {
+    padding: 12px 20px; background: #fff; border-bottom: 1px solid #e5e5ea;
+    display: flex; align-items: center; gap: 16px;
+  }
+  header h1 { font-size: 16px; font-weight: 600; }
+  header .hint { font-size: 12px; color: #86868b; }
+
+  /* 关键：grid-template-rows 用 minmax(0, 1fr)，否则 grid 单元格会被内容撑高，
+     导致内部 overflow:auto 永远不滚（左右两栏的"看不到"和"划不动"都是这个原因） */
+  .app {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 280px 1fr 320px;
+    grid-template-rows: minmax(0, 1fr);
+    min-height: 0;
+  }
+
+  /* 左侧：上传 + 划线列表 */
+  .left-panel {
+    background: #fff; border-right: 1px solid #e5e5ea;
+    padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px;
+  }
+  .section-title { font-size: 12px; font-weight: 600; color: #6e6e73; text-transform: uppercase; letter-spacing: 0.5px; }
+
+  /* 使用 SVG data-url 做边框，dash 间距均匀、拐角整齐，而不是 CSS dashed 在小尺寸下出现的长短不一 */
+  .upload-area {
+    border-radius: 12px;
+    padding: 18px 14px;
+    text-align: center;
+    cursor: pointer;
+    transition: background 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+    background-color: #fafafa;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='100%25' height='100%25'><rect width='100%25' height='100%25' fill='none' rx='12' ry='12' stroke='%23c7c7cc' stroke-width='1.5' stroke-dasharray='6 5'/></svg>");
+    background-repeat: no-repeat;
+    background-size: 100% 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    box-sizing: border-box;
+  }
+  .upload-area:hover, .upload-area.drag {
+    background-color: #f0f7ff;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='100%25' height='100%25'><rect width='100%25' height='100%25' fill='none' rx='12' ry='12' stroke='%23007aff' stroke-width='1.5' stroke-dasharray='6 5'/></svg>");
+    box-shadow: 0 2px 10px rgba(0, 122, 255, 0.08);
+    transform: translateY(-1px);
+  }
+  .upload-area .ua-icon { color: #8e8e93; line-height: 1; }
+  .upload-area .ua-title { font-weight: 500; color: #1d1d1f; font-size: 14px; margin-top: 2px; }
+  .upload-area p { font-size: 12px; color: #86868b; margin: 0; line-height: 1.45; }
+  .upload-area:hover .ua-icon, .upload-area.drag .ua-icon { color: #007aff; }
+
+  .keyword-search { display: flex; gap: 6px; }
+  .keyword-search input {
+    flex: 1; padding: 7px 10px; border: 1px solid #d2d2d7; border-radius: 6px; font-size: 13px;
+  }
+  .keyword-search button {
+    padding: 7px 12px; background: #007aff; color: #fff; border: 0; border-radius: 6px;
+    font-size: 13px; cursor: pointer;
+  }
+  .keyword-search button:disabled { background: #c7c7cc; cursor: not-allowed; }
+  .ocr-status { font-size: 11px; color: #86868b; min-height: 14px; }
+
+  .marks-list { display: flex; flex-direction: column; gap: 8px; }
+  .mark-item {
+    padding: 10px; border: 1px solid #e5e5ea; border-radius: 8px; background: #fafafa;
+    display: flex; flex-direction: column; gap: 6px; cursor: pointer;
+  }
+  .mark-item.active { border-color: #007aff; background: #f0f7ff; }
+  .mark-item-header { display: flex; align-items: center; gap: 8px; }
+  .mark-color-dot { width: 14px; height: 14px; border-radius: 4px; border: 1px solid #00000014; }
+  .mark-index { font-size: 12px; font-weight: 600; flex: 1; }
+  .mark-delete {
+    background: transparent; border: 0; color: #ff3b30; cursor: pointer; font-size: 16px; padding: 0 4px;
+  }
+  .mark-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #6e6e73; }
+  .mark-row input[type=number] { width: 48px; padding: 2px 4px; border: 1px solid #d2d2d7; border-radius: 4px; font-size: 11px; }
+  .mark-row select { padding: 2px 4px; border: 1px solid #d2d2d7; border-radius: 4px; font-size: 11px; }
+  .mark-text { font-size: 11px; color: #86868b; line-height: 1.3; max-height: 28px; overflow: hidden; }
+
+  /* 中间：画布 */
+  .canvas-area {
+    background: #1d1d1f; padding: 20px; overflow: auto;
+    display: flex; align-items: center; justify-content: center; position: relative;
+  }
+  .canvas-wrap {
+    position: relative; background: #fff; box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+    max-width: 100%; max-height: 100%; overflow: hidden;
+  }
+  /* 视频比例"画板"模式：透明格子底，把文献浮在里面 */
+  .canvas-wrap.frame-mode,
+  .canvas-wrap.transparent-bg {
+    background: repeating-conic-gradient(#e5e5ea 0% 25%, #fff 0% 50%) 50% / 20px 20px;
+  }
+  /* 3D 预览模式：背景改成格子透明底 */
+  .canvas-wrap.gl-mode {
+    background: repeating-conic-gradient(#d9d9e0 0% 25%, #fff 0% 50%) 50% / 20px 20px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+  }
+  .canvas-group { position: absolute; transform-origin: top left; }
+  /* auto 模式下 canvas-group 等同铺满 wrap（transform 会被 JS 重置） */
+  .canvas-wrap:not(.frame-mode) .canvas-group { top: 0; left: 0; }
+  /* 画布显示尺寸完全由 JS 通过 style.width/height 控制。
+     不加 max-width / max-height，否则图片超过视口时会被 CSS 单轴限制、导致非等比缩放。 */
+  #imgCanvas, #drawCanvas, #boxCanvas, #glCanvas {
+    display: block;
+  }
+  #drawCanvas, #boxCanvas { position: absolute; left: 0; top: 0; }
+  #glCanvas { position: absolute; left: 0; top: 0; }
+  /* 荧光笔效果：让划线颜色落在文字下面（保留文字可读）。
+     不论文献是否反相，划线统一用 multiply：
+     - 白底文献（原图）：黄×白=黄、黄×黑=黑 → 黄底黑字
+     - 反相文献：在划线区先把"原图"打补丁回去（详见 JS 里的 punchOriginalUnderHighlights），
+       再 multiply 划线色 → 同样得到"黄底黑字"，与图二一致 */
+  #drawCanvas { mix-blend-mode: multiply; }
+  #boxCanvas { cursor: crosshair; }
+  /* 3D WebGL 覆盖画布；默认不显示，启用 3D 透视时盖在上面 */
+  #glCanvas { display: none; pointer-events: none; background: transparent; }
+  .canvas-wrap.gl-mode .canvas-group { display: none; }
+  .canvas-wrap.gl-mode #glCanvas { display: block; }
+  .canvas-empty { color: #86868b; font-size: 14px; text-align: center; }
+
+  .canvas-toolbar {
+    position: absolute; top: 76px; left: 30px; display: flex; gap: 6px; flex-wrap: wrap;
+    background: #fff; border-radius: 8px; padding: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    max-width: calc(100% - 60px); z-index: 30;
+  }
+  .tool-btn {
+    background: transparent; border: 0; padding: 6px 10px; border-radius: 4px;
+    cursor: pointer; font-size: 12px; color: #1d1d1f;
+  }
+  .tool-btn.active { background: #007aff; color: #fff; }
+  .tool-btn:hover:not(.active) { background: #f5f5f7; }
+
+  /* 右侧：样式 + 导出 */
+  .right-panel {
+    background: #fff; border-left: 1px solid #e5e5ea;
+    padding: 12px 12px 24px;
+    overflow-y: auto; overflow-x: hidden;
+    display: flex; flex-direction: column; gap: 8px;
+    overscroll-behavior: contain;
+    min-height: 0;
+  }
+  /* 左面板同理（保证内容很多时也能滚动） */
+  .left-panel { min-height: 0; }
+
+  /* 折叠面板（每个右侧分区都是一个 <details class="acc">） */
+  details.acc {
+    background: #fff; border: 1px solid #e5e5ea; border-radius: 10px;
+    flex-shrink: 0;            /* 不允许 flex 容器把卡片压扁 */
+    box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+  }
+  details.acc > summary {
+    list-style: none; cursor: pointer; user-select: none;
+    padding: 12px 14px;
+    font-size: 13px; font-weight: 600; color: #1d1d1f;
+    display: flex; align-items: center; gap: 10px;
+    line-height: 1.4;          /* 给中文字形足够的行高，不再被切上下半 */
+    border-radius: 10px;       /* 关闭状态下卡片整体保持圆角 */
+  }
+  details.acc[open] > summary {
+    border-radius: 10px 10px 0 0;
+    border-bottom: 1px solid #e5e5ea;
+  }
+  details.acc > summary::-webkit-details-marker { display: none; }
+  details.acc > summary::before {
+    content: '';
+    flex: 0 0 8px;
+    width: 8px; height: 8px;
+    border-right: 1.6px solid #6e6e73;
+    border-bottom: 1.6px solid #6e6e73;
+    transform: rotate(-45deg);
+    transition: transform 0.18s ease;
+    margin-left: 2px;
+  }
+  details.acc[open] > summary::before { transform: rotate(45deg); }
+  details.acc > summary:hover { background: #f5f5f7; border-radius: inherit; }
+  details.acc > .acc-body { padding: 12px 14px 14px; background: #fafafa; border-radius: 0 0 10px 10px; }
+
+  .style-tabs { display: flex; gap: 4px; background: #f5f5f7; padding: 4px; border-radius: 8px; }
+  .style-tab {
+    flex: 1; padding: 6px; border: 0; background: transparent; font-size: 12px;
+    border-radius: 6px; cursor: pointer; color: #6e6e73;
+  }
+  .style-tab.active { background: #fff; color: #1d1d1f; box-shadow: 0 1px 2px rgba(0,0,0,0.06); font-weight: 600; }
+
+  .colors { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; }
+  .color-swatch {
+    aspect-ratio: 1; border-radius: 6px; cursor: pointer; border: 2px solid transparent;
+    transition: transform 0.1s;
+  }
+  .color-swatch:hover { transform: scale(1.1); }
+  .color-swatch.active { border-color: #1d1d1f; }
+
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label { font-size: 12px; color: #6e6e73; }
+  .field input[type=range] { width: 100%; }
+  .field-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .field-row input[type=color] { width: 32px; height: 32px; border: 0; border-radius: 4px; cursor: pointer; padding: 0; background: transparent; }
+  .field-row input[type=number] { width: 60px; padding: 4px 6px; border: 1px solid #d2d2d7; border-radius: 4px; }
+  .field-row select { padding: 4px 6px; border: 1px solid #d2d2d7; border-radius: 4px; flex: 1; }
+
+  .play-controls { display: flex; gap: 8px; }
+  .btn {
+    padding: 8px 12px; border: 1px solid #d2d2d7; background: #fff; color: #1d1d1f;
+    border-radius: 6px; cursor: pointer; font-size: 13px; flex: 1;
+  }
+  .btn:hover { background: #f5f5f7; }
+  .btn.primary { background: #007aff; color: #fff; border-color: #007aff; }
+  .btn.primary:hover { background: #0066d6; }
+  .btn.danger { background: #fff; color: #ff3b30; border-color: #ff3b3033; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .export-status { font-size: 12px; color: #86868b; min-height: 16px; }
+  .progress-bar { height: 4px; background: #f5f5f7; border-radius: 2px; overflow: hidden; }
+  .progress-bar-fill { height: 100%; background: #007aff; transition: width 0.2s; width: 0%; }
+
+  .divider { height: 1px; background: #e5e5ea; margin: 4px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>文献划线工具</h1>
+  <span class="hint">上传截图 → 框选/搜索关键词 → 调整样式 → 导出动画</span>
+</header>
+
+<div class="app">
+  <!-- 左侧 -->
+  <aside class="left-panel">
+    <div>
+      <div class="section-title">1. 导入文献</div>
+      <div style="height:8px"></div>
+      <label class="upload-area" id="uploadArea" style="padding:22px 12px;min-height:110px">
+        <input type="file" id="fileInput" accept="image/*" style="display:none">
+        <div class="ua-icon" style="font-size:28px">📄</div>
+        <div class="ua-title">点击上传图片</div>
+        <p>拖入 / Ctrl+V 粘贴 均可</p>
+      </label>
+      <div style="height:10px"></div>
+      <div class="keyword-search">
+        <input type="text" id="urlInput" placeholder="文献 URL ..." style="flex:1;padding:7px 10px;border:1px solid #d2d2d7;border-radius:6px;font-size:13px">
+        <button id="fetchUrlBtn">抓取</button>
+      </div>
+      <div class="field-row" style="margin-top:6px">
+        <label style="color:#6e6e73">模式</label>
+        <select id="urlMode" style="padding:4px 6px;border:1px solid #d2d2d7;border-radius:4px;flex:1;font-size:12px">
+          <option value="shot">网页截图（原版式，易被反爬拦）</option>
+          <option value="reader" selected>正文提取（稳定，绕验证）</option>
+        </select>
+      </div>
+      <div class="ocr-status" id="urlStatus" style="margin-top:4px;line-height:1.4">正文提取用 Jina Reader，能绕过 NCBI/IEEE 等验证页；需要原版式则用"网页截图"+手动截图兜底</div>
+    </div>
+
+    <div>
+      <div class="section-title">2. 关键词查找（OCR）</div>
+      <div style="height:8px"></div>
+      <div class="keyword-search">
+        <input type="text" id="keywordInput" placeholder="输入关键词，回车搜索">
+        <button id="searchBtn" disabled>搜索</button>
+      </div>
+      <div class="ocr-status" id="ocrStatus">先上传图片后才能搜索</div>
+    </div>
+
+    <div>
+      <div class="section-title">3. 划线列表</div>
+      <div style="height:8px"></div>
+      <div class="marks-list" id="marksList">
+        <div style="font-size:12px; color:#86868b;">尚未添加，先在画布上框选区域</div>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- 中间画布 -->
+  <main class="canvas-area" id="canvasArea">
+    <!-- 顶部画布尺寸切换条（导入后可见；绝对定位浮在 canvasArea 顶部，不挤压画布布局） -->
+    <div id="aspectSwitchBar" style="display:none;gap:6px;align-items:center;padding:6px 10px;background:rgba(255,255,255,0.96);border:1px solid #e5e5ea;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,.12);position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:20;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)">
+      <span style="font-size:12px;color:#6e6e73;margin-right:4px">画布尺寸</span>
+      <button class="aspect-btn" data-aspect="16:9" style="padding:6px 14px;border:1px solid #d2d2d7;background:#fff;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">横屏 16:9</button>
+      <button class="aspect-btn" data-aspect="9:16" style="padding:6px 14px;border:1px solid #d2d2d7;background:#fff;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">竖屏 9:16</button>
+      <button class="aspect-btn" data-aspect="auto" style="padding:6px 14px;border:1px solid #d2d2d7;background:#fff;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">原图尺寸</button>
+    </div>
+    <div class="canvas-empty" id="canvasEmpty">请先上传图片</div>
+    <div class="canvas-wrap" id="canvasWrap" style="display:none;">
+      <div class="canvas-group" id="canvasGroup">
+        <canvas id="imgCanvas"></canvas>
+        <canvas id="drawCanvas"></canvas>
+        <canvas id="boxCanvas"></canvas>
+      </div>
+      <canvas id="glCanvas"></canvas>
+    </div>
+    <div class="canvas-toolbar" id="canvasToolbar" style="display:none;">
+      <button class="tool-btn active" data-tool="select">框选划线</button>
+      <button class="tool-btn" data-tool="crop">裁切</button>
+      <span style="width:1px;background:#e5e5ea;margin:4px 2px"></span>
+      <button class="tool-btn" id="undoBtn" disabled title="撤回（Ctrl/Cmd + Z）">↶ 撤回</button>
+      <button class="tool-btn" id="redoBtn" disabled title="重做（Ctrl/Cmd + Shift + Z）">↷ 重做</button>
+      <span style="width:1px;background:#e5e5ea;margin:4px 2px"></span>
+      <span id="exportSizeLabel" style="font-size:12px;color:#6e6e73;padding:0 6px;align-self:center">预览 = 导出尺寸 –</span>
+      <span style="width:1px;background:#e5e5ea;margin:4px 2px"></span>
+      <label id="cropRadiusWrap" style="display:none;align-items:center;gap:6px;font-size:12px;color:#6e6e73;padding:0 6px">
+        <span>圆角</span>
+        <input type="range" id="cropRadiusRange" min="0" max="200" value="0" style="width:110px">
+        <span id="cropRadiusVal" style="width:36px;text-align:right">0px</span>
+      </label>
+      <button class="tool-btn" id="applyCropBtn" style="display:none;background:#ff9500;color:#fff">应用裁切</button>
+      <button class="tool-btn" id="cancelCropBtn" style="display:none">取消</button>
+    </div>
+    <!-- 画布右下角浮动预览控制条（导入图片后显示） -->
+    <div id="previewOverlay" style="display:none;position:absolute;right:14px;bottom:14px;z-index:25;gap:6px;align-items:center;background:rgba(255,255,255,0.96);padding:5px 6px;border-radius:8px;box-shadow:0 3px 10px rgba(0,0,0,0.15);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)">
+      <button class="btn primary" id="playBtn" style="padding:5px 12px;font-size:12px;line-height:1.2;white-space:nowrap;height:28px;display:inline-flex;align-items:center;justify-content:center">▶ 播放预览</button>
+      <button class="btn" id="resetBtn" style="padding:5px 12px;font-size:12px;line-height:1.2;white-space:nowrap;height:28px;display:inline-flex;align-items:center;justify-content:center">重置</button>
+    </div>
+  </main>
+
+  <!-- 右侧 -->
+  <aside class="right-panel">
+    <details class="acc" open>
+      <summary>划线样式</summary>
+      <div class="acc-body">
+        <div>
+          <div class="section-title">划线风格</div>
+          <div style="height:8px"></div>
+          <div class="style-tabs">
+            <button class="style-tab active" data-style="block">色块</button>
+            <button class="style-tab" data-style="highlight">荧光笔</button>
+            <button class="style-tab" data-style="negative-dark">负片·黑底白字</button>
+          </div>
+        </div>
+
+        <div style="margin-top:10px">
+          <div class="section-title">颜色</div>
+          <div style="height:8px"></div>
+          <div class="colors" id="colorPalette"></div>
+          <div style="height:8px"></div>
+          <div class="field-row">
+            <input type="color" id="customColor" value="#ffeb3b">
+            <span style="color:#86868b">自定义颜色</span>
+          </div>
+        </div>
+
+        <div class="field" style="margin-top:10px">
+          <div class="field-row">
+            <label style="flex:1">透明度</label>
+            <span id="opacityVal" style="color:#6e6e73;width:36px;text-align:right">50%</span>
+          </div>
+          <input type="range" id="opacityRange" min="10" max="100" value="50">
+        </div>
+
+        <div class="field" style="margin-top:8px">
+          <div class="field-row">
+            <label style="flex:1">粗细</label>
+            <span id="thicknessVal" style="color:#6e6e73;width:36px;text-align:right">22px</span>
+          </div>
+          <input type="range" id="thicknessRange" min="6" max="120" value="22">
+        </div>
+        <div class="field" style="margin-top:8px">
+          <div class="field-row">
+            <label style="flex:1">圆角（色块 / 负片）</label>
+            <span id="radiusVal" style="color:#6e6e73;width:36px;text-align:right">6px</span>
+          </div>
+          <input type="range" id="radiusRange" min="0" max="60" value="6">
+        </div>
+
+        <!-- 划线辉光（适用于荧光笔，模拟图二的发光描边）-->
+        <div style="margin-top:10px;padding-top:10px;border-top:1px dashed #d2d2d7">
+          <div class="field-row" style="margin-bottom:6px">
+            <label style="flex:1;font-weight:600;color:#1d1d1f">划线辉光</label>
+            <input type="checkbox" id="markGlowEnabled">
+          </div>
+          <div class="field" style="margin-bottom:6px">
+            <div class="field-row">
+              <label style="flex:1">辉光强度</label>
+              <span id="markGlowBlurVal" style="color:#6e6e73;width:48px;text-align:right">18px</span>
+            </div>
+            <input type="range" id="markGlowBlur" min="0" max="80" value="18">
+          </div>
+          <div class="field-row" style="margin-bottom:6px">
+            <label style="flex:1;color:#6e6e73">辉光颜色</label>
+            <select id="markGlowMode" style="padding:3px 6px;border:1px solid #d2d2d7;border-radius:4px;font-size:12px">
+              <option value="auto" selected>跟随划线色</option>
+              <option value="custom">自定义</option>
+            </select>
+            <input type="color" id="markGlowColor" value="#ffeb3b">
+          </div>
+          <div class="field" style="margin-bottom:6px">
+            <div class="field-row">
+              <label style="flex:1">辉光不透明度</label>
+              <span id="markGlowOpacityVal" style="color:#6e6e73;width:48px;text-align:right">80%</span>
+            </div>
+            <input type="range" id="markGlowOpacity" min="0" max="100" value="80">
+          </div>
+          <div style="font-size:11px;color:#86868b;margin-top:2px;line-height:1.4">在划线外侧叠一层柔和光晕（适合荧光笔 / 色块在深色文献上的发光感）</div>
+        </div>
+
+        <div class="field" style="margin-top:10px">
+          <div class="field-row">
+            <label style="flex:1">动画时长</label>
+            <span id="durationVal" style="color:#6e6e73;width:52px;text-align:right">1.0s</span>
+          </div>
+          <input type="range" id="durationRange" min="2" max="50" value="10">
+          <div style="font-size:11px;color:#86868b;margin-top:4px">调整后会同步到所有已有划线与新增划线</div>
+        </div>
+
+        <div class="field" style="margin-top:8px">
+          <div class="field-row">
+            <label style="flex:1">起始停留</label>
+            <span id="startDelayVal" style="color:#6e6e73;width:52px;text-align:right">0.0s</span>
+          </div>
+          <input type="range" id="startDelayRange" min="0" max="50" value="0" step="1">
+          <div style="font-size:11px;color:#86868b;margin-top:4px">空白文献先停留这么长时间再开始划线（0 = 立即开始）</div>
+        </div>
+      </div>
+    </details>
+
+    <details class="acc">
+      <summary>画布尺寸 & 3D 透视</summary>
+      <div class="acc-body">
+        <!-- 文献颜色反转：放在画布与 3D 设置上方，方便先调底图再调框架 -->
+        <div style="margin-bottom:10px;padding:8px 10px;background:#fff;border:1px solid #e5e5ea;border-radius:8px">
+          <div class="field-row">
+            <label style="flex:1;color:#1d1d1f;font-weight:600">文献颜色反转</label>
+            <input type="checkbox" id="invertDoc">
+          </div>
+          <div style="font-size:11px;color:#86868b;margin-top:4px;line-height:1.4">把文献变成"黑底白字"的暗色版本（划线颜色不受影响），常用于发光笔记效果</div>
+        </div>
+        <!-- 纯文字透明背景：去掉文献的纸面，只保留文字字形 -->
+        <div style="margin-bottom:10px;padding:8px 10px;background:#fff;border:1px solid #e5e5ea;border-radius:8px">
+          <div class="field-row">
+            <label style="flex:1;color:#1d1d1f;font-weight:600">纯文字透明背景</label>
+            <input type="checkbox" id="transparentBg">
+          </div>
+          <div class="field" style="margin-top:6px">
+            <div class="field-row">
+              <label style="flex:1;color:#6e6e73">去背景强度</label>
+              <span id="transparentThresholdVal" style="color:#6e6e73;width:48px;text-align:right">80</span>
+            </div>
+            <input type="range" id="transparentThreshold" min="20" max="220" value="80" step="1">
+          </div>
+          <div style="font-size:11px;color:#86868b;margin-top:4px;line-height:1.4">自动识别文献的背景色（白纸 / 黑底 / 彩色底都行），按颜色距离把"近似背景"的像素抹成透明，只保留文字字形。强度越大去得越彻底，越小越保守（保留更多接近背景色的像素）</div>
+        </div>
+      <div class="field-row" style="margin-bottom:6px">
+        <label style="flex:1;color:#6e6e73">视频比例</label>
+        <select id="videoAspect" style="padding:4px 6px;border:1px solid #d2d2d7;border-radius:4px">
+          <option value="auto">原图尺寸</option>
+          <option value="16:9" selected>横屏 16:9</option>
+          <option value="9:16">竖屏 9:16</option>
+        </select>
+      </div>
+      <div class="field-row" style="font-size:11px;color:#86868b;margin-bottom:4px">背景透明，文献在画布内自由缩放/移动</div>
+      <div class="field" style="margin-bottom:6px">
+        <div class="field-row">
+          <label style="flex:1">文献缩放</label>
+          <span id="docScaleVal" style="color:#6e6e73;width:48px;text-align:right">100%</span>
+        </div>
+        <input type="range" id="docScale" min="20" max="300" value="100">
+      </div>
+      <div class="field" style="margin-bottom:6px">
+        <div class="field-row">
+          <label style="flex:1">水平位置</label>
+          <span id="docOffsetXVal" style="color:#6e6e73;width:48px;text-align:right">0</span>
+        </div>
+        <input type="range" id="docOffsetX" min="-100" max="100" value="0">
+      </div>
+      <div class="field" style="margin-bottom:6px">
+        <div class="field-row">
+          <label style="flex:1">垂直位置</label>
+          <span id="docOffsetYVal" style="color:#6e6e73;width:48px;text-align:right">0</span>
+        </div>
+        <input type="range" id="docOffsetY" min="-100" max="100" value="0">
+      </div>
+      <div class="field" style="margin-bottom:6px">
+        <div class="field-row">
+          <label style="flex:1">平面旋转</label>
+          <span id="docRotationVal" style="color:#6e6e73;width:48px;text-align:right">0°</span>
+        </div>
+        <input type="range" id="docRotation" min="-180" max="180" value="0" step="1">
+      </div>
+
+      <!-- 主文献入画动画 -->
+      <div style="margin-top:8px;padding-top:8px;border-top:1px dashed #d2d2d7">
+        <div class="field-row" style="margin-bottom:4px">
+          <label style="flex:1;font-weight:600">文献入画动画</label>
+        </div>
+        <div class="field" style="margin-bottom:6px">
+          <select id="docEntrance" style="width:100%;padding:4px 6px;border:1px solid #d2d2d7;border-radius:5px;font-size:13px;background:#fff">
+            <option value="none">无（直接显示）</option>
+            <option value="fade">淡入淡出</option>
+            <option value="flip">翻页</option>
+            <option value="slide-left">从左滑入</option>
+            <option value="slide-right">从右滑入</option>
+            <option value="slide-top">从上滑入</option>
+            <option value="slide-bottom">从下滑入</option>
+            <option value="zoom">缩放弹出</option>
+          </select>
+        </div>
+        <div class="field" style="margin-bottom:6px">
+          <div class="field-row">
+            <label style="flex:1">出现时间</label>
+            <span id="docEntranceDelayVal" style="color:#6e6e73;width:48px;text-align:right">0.0s</span>
+          </div>
+          <input type="range" id="docEntranceDelay" min="0" max="100" value="0" step="1" title="从 0 开始多少秒后入画（x10 秒）">
+        </div>
+        <div class="field" style="margin-bottom:6px">
+          <div class="field-row">
+            <label style="flex:1">动画时长</label>
+            <span id="docEntranceDurVal" style="color:#6e6e73;width:48px;text-align:right">0.8s</span>
+          </div>
+          <input type="range" id="docEntranceDur" min="1" max="50" value="8" step="1" title="入画动画持续时间（x10 秒）">
+        </div>
+      </div>
+
+      <div class="field-row" style="margin-bottom:6px;margin-top:10px">
+        <label style="flex:1;color:#6e6e73">启用 3D 透视</label>
+        <input type="checkbox" id="perspective3D">
+      </div>
+      <div class="field" style="margin-bottom:6px">
+        <div class="field-row">
+          <label style="flex:1">X 轴旋转</label>
+          <span id="rotXVal" style="color:#6e6e73;width:48px;text-align:right">0°</span>
+        </div>
+        <input type="range" id="rotX" min="-80" max="80" value="0">
+      </div>
+      <div class="field" style="margin-bottom:6px">
+        <div class="field-row">
+          <label style="flex:1">Y 轴旋转</label>
+          <span id="rotYVal" style="color:#6e6e73;width:48px;text-align:right">0°</span>
+        </div>
+        <input type="range" id="rotY" min="-80" max="80" value="0">
+      </div>
+      <div class="field" style="margin-bottom:6px">
+        <div class="field-row">
+          <label style="flex:1">Z 轴旋转</label>
+          <span id="rotZVal" style="color:#6e6e73;width:48px;text-align:right">0°</span>
+        </div>
+        <input type="range" id="rotZ" min="-180" max="180" value="0">
+      </div>
+      <div class="field" style="margin-bottom:6px">
+        <div class="field-row">
+          <label style="flex:1">透视强度 (FOV)</label>
+          <span id="fovVal" style="color:#6e6e73;width:48px;text-align:right">45°</span>
+        </div>
+        <input type="range" id="fov" min="20" max="80" value="45">
+      </div>
+      <div class="play-controls" style="margin-top:4px">
+        <button class="btn" id="reset3DBtn" style="flex:1">重置 3D 变换</button>
+      </div>
+      <div class="ocr-status" id="glStatus" style="margin-top:4px;line-height:1.4">WebGL 实时预览；导出 MOV 时使用同样的精确透视</div>
+      </div>
+    </details>
+
+    <details class="acc">
+      <summary>文献阴影</summary>
+      <div class="acc-body">
+      <div class="field-row" style="margin-bottom:6px">
+        <label style="flex:1;color:#6e6e73">启用阴影</label>
+        <input type="checkbox" id="docShadowEnabled">
+      </div>
+      <div class="field" style="margin-bottom:6px">
+        <div class="field-row">
+          <label style="flex:1">模糊度</label>
+          <span id="docShadowBlurVal" style="color:#6e6e73;width:48px;text-align:right">30px</span>
+        </div>
+        <input type="range" id="docShadowBlur" min="0" max="120" value="30">
+      </div>
+      <div class="field" style="margin-bottom:6px">
+        <div class="field-row">
+          <label style="flex:1">水平距离</label>
+          <span id="docShadowOffsetXVal" style="color:#6e6e73;width:48px;text-align:right">0px</span>
+        </div>
+        <input type="range" id="docShadowOffsetX" min="-80" max="80" value="0">
+      </div>
+      <div class="field" style="margin-bottom:6px">
+        <div class="field-row">
+          <label style="flex:1">垂直距离</label>
+          <span id="docShadowOffsetYVal" style="color:#6e6e73;width:48px;text-align:right">14px</span>
+        </div>
+        <input type="range" id="docShadowOffsetY" min="-80" max="80" value="14">
+      </div>
+      <div class="field-row" style="margin-bottom:6px">
+        <label style="flex:1;color:#6e6e73">颜色</label>
+        <input type="color" id="docShadowColor" value="#000000">
+      </div>
+      <div class="field" style="margin-bottom:6px">
+        <div class="field-row">
+          <label style="flex:1">阴影不透明度</label>
+          <span id="docShadowOpacityVal" style="color:#6e6e73;width:48px;text-align:right">45%</span>
+        </div>
+        <input type="range" id="docShadowOpacity" min="0" max="100" value="45">
+      </div>
+      <div style="font-size:11px;color:#86868b;margin-top:4px;line-height:1.4">阴影只在"预览 / 导出"时可见；编辑画布用 CSS 模拟同样效果以便对位</div>
+      </div>
+    </details>
+
+    <details class="acc" open>
+      <summary>字幕翻译</summary>
+      <div class="acc-body">
+
+      <!-- 翻译动作区（统一入口） -->
+      <div style="background:#f7f7fa;border:1px solid #e5e5ea;border-radius:8px;padding:10px;margin-bottom:10px">
+        <div class="field-row" style="margin-bottom:8px">
+          <label style="flex:1;color:#1d1d1f;font-weight:600">翻译方式</label>
+          <div style="display:flex;gap:0;border:1px solid #d2d2d7;border-radius:6px;overflow:hidden">
+            <button type="button" class="trans-mode-btn active" data-mode="combined" style="padding:5px 10px;font-size:12px;border:0;background:#007aff;color:#fff;cursor:pointer">整段翻译</button>
+            <button type="button" class="trans-mode-btn" data-mode="per-mark" style="padding:5px 10px;font-size:12px;border:0;background:#fff;color:#1d1d1f;cursor:pointer;border-left:1px solid #d2d2d7">分句翻译</button>
+          </div>
+        </div>
+        <div class="field-row" style="font-size:11px;color:#86868b;margin-bottom:8px;line-height:1.5" id="transModeHint">整段翻译：把所有划线原文拼接后一次翻译，译文连贯；字幕放在最末划线下方。</div>
+        <div class="play-controls" style="margin-top:4px;margin-bottom:6px">
+          <button class="btn" id="ocrAllBtn" style="flex:1">识别所有划线原文</button>
+        </div>
+        <div class="play-controls" style="margin-top:4px">
+          <button class="btn primary" id="translateAllBtn" style="flex:1">翻译全部划线</button>
+        </div>
+        <div class="ocr-status" id="translateStatus" style="margin-top:6px;line-height:1.4;min-height:16px"></div>
+        <div id="wholeTranslationWrap" style="margin-top:8px;display:none">
+          <div class="field-row" style="font-size:11px;color:#6e6e73;margin-bottom:2px">
+            <span style="flex:1">整段译文（字幕内容，可手动编辑）</span>
+            <span id="wholeTranslationStale" style="color:#ff9500;display:none">划线已改，建议重译</span>
+          </div>
+          <textarea id="wholeTranslation" placeholder="点击上方"翻译全部划线"后，这里会出现一段连贯的整段译文" style="width:100%;min-height:72px;padding:6px 8px;font-size:12px;border:1px solid #d2d2d7;border-radius:6px;resize:vertical;font-family:inherit;box-sizing:border-box;line-height:1.5"></textarea>
+        </div>
+      </div>
+
+      <!-- 字幕显示样式 -->
+      <div class="field-row" style="margin-bottom:6px">
+        <label style="flex:1;color:#6e6e73">开启译文字幕</label>
+        <input type="checkbox" id="subEnabled" checked>
+      </div>
+      <!-- subMode 保持为隐藏的 state，实际由上方按钮切换 -->
+      <select id="subMode" style="display:none">
+        <option value="combined" selected>combined</option>
+        <option value="per-mark">per-mark</option>
+      </select>
+      <div class="field-row" style="margin-bottom:6px" id="subCombinedGapRow">
+        <label style="flex:1;color:#6e6e73">与划线间距</label>
+        <input type="number" id="subCombinedGap" min="0" max="400" value="24" style="width:64px;padding:2px 4px;font-size:12px;border:1px solid #d2d2d7;border-radius:4px">
+        <span style="color:#86868b;font-size:11px">px</span>
+      </div>
+      <div class="field-row" style="margin-bottom:6px">
+        <label style="flex:1;color:#6e6e73">位置微调</label>
+        <input type="number" id="subOffsetX" min="-800" max="800" value="0" style="width:60px;padding:2px 4px;font-size:12px;border:1px solid #d2d2d7;border-radius:4px" title="水平偏移：正值右移">
+        <span style="color:#86868b;font-size:11px">X</span>
+        <input type="number" id="subOffsetY" min="-800" max="800" value="0" style="width:60px;padding:2px 4px;font-size:12px;border:1px solid #d2d2d7;border-radius:4px" title="垂直偏移：正值下移">
+        <span style="color:#86868b;font-size:11px">Y</span>
+      </div>
+      <div class="field-row" style="margin-bottom:6px">
+        <label style="flex:1;color:#6e6e73">字体颜色</label>
+        <input type="color" id="subFontColor" value="#ffffff">
+      </div>
+      <div class="field" style="margin-bottom:6px">
+        <div class="field-row">
+          <label style="flex:1">字号</label>
+          <span id="subFontSizeVal" style="color:#6e6e73;width:36px;text-align:right">28</span>
+        </div>
+        <input type="range" id="subFontSize" min="14" max="72" value="28">
+      </div>
+      <div class="field-row" style="margin-bottom:6px">
+        <label style="flex:1;color:#6e6e73">加粗</label>
+        <input type="checkbox" id="subBold" checked>
+      </div>
+      <!-- 文字描边 -->
+      <div class="field-row" style="margin-bottom:6px;margin-top:8px">
+        <label style="flex:1;color:#6e6e73">文字描边</label>
+        <input type="color" id="subStrokeColor" value="#000000">
+        <input type="number" id="subStrokeWidth" min="0" max="20" step="0.5" value="0" style="width:56px;padding:2px 4px;font-size:12px;border:1px solid #d2d2d7;border-radius:4px" title="0 = 不描边">
+        <span style="color:#86868b;font-size:11px">px</span>
+      </div>
+      <!-- 文字阴影 -->
+      <div class="field-row" style="margin-bottom:6px">
+        <label style="flex:1;color:#6e6e73">文字阴影</label>
+        <input type="color" id="subShadowColor" value="#000000">
+        <input type="number" id="subShadowBlur" min="0" max="40" step="1" value="0" style="width:56px;padding:2px 4px;font-size:12px;border:1px solid #d2d2d7;border-radius:4px" title="模糊半径，0 = 不启用">
+        <span style="color:#86868b;font-size:11px">模糊</span>
+      </div>
+      <div class="field-row" style="margin-bottom:6px">
+        <label style="flex:1;color:#6e6e73">阴影偏移</label>
+        <input type="number" id="subShadowOffsetX" min="-40" max="40" step="1" value="0" style="width:56px;padding:2px 4px;font-size:12px;border:1px solid #d2d2d7;border-radius:4px">
+        <span style="color:#86868b;font-size:11px">X</span>
+        <input type="number" id="subShadowOffsetY" min="-40" max="40" step="1" value="0" style="width:56px;padding:2px 4px;font-size:12px;border:1px solid #d2d2d7;border-radius:4px">
+        <span style="color:#86868b;font-size:11px">Y</span>
+      </div>
+      <div class="field-row" style="margin-bottom:6px;margin-top:8px">
+        <label style="flex:1;color:#6e6e73">底色块颜色</label>
+        <input type="color" id="subBgColor" value="#000000">
+      </div>
+      <div class="field" style="margin-bottom:6px">
+        <div class="field-row">
+          <label style="flex:1">底色块透明度</label>
+          <span id="subBgOpacityVal" style="color:#6e6e73;width:36px;text-align:right">70%</span>
+        </div>
+        <input type="range" id="subBgOpacity" min="0" max="100" value="70">
+      </div>
+      <div class="field" style="margin-bottom:6px">
+        <div class="field-row">
+          <label style="flex:1">圆角</label>
+          <span id="subRadiusVal" style="color:#6e6e73;width:36px;text-align:right">8px</span>
+        </div>
+        <input type="range" id="subRadius" min="0" max="60" value="8">
+      </div>
+      <div class="field-row" style="margin-bottom:6px">
+        <label style="flex:1;color:#6e6e73">内边距</label>
+        <input type="number" id="subPadX" min="4" max="60" value="18" style="width:48px;padding:2px 4px;font-size:12px;border:1px solid #d2d2d7;border-radius:4px">
+        <span style="color:#86868b;font-size:11px">横</span>
+        <input type="number" id="subPadY" min="2" max="40" value="10" style="width:48px;padding:2px 4px;font-size:12px;border:1px solid #d2d2d7;border-radius:4px">
+        <span style="color:#86868b;font-size:11px">纵</span>
+      </div>
+      <div class="field" style="margin-bottom:6px">
+        <div class="field-row">
+          <label style="flex:1">起始偏移</label>
+          <span id="subDelayVal" style="color:#6e6e73;width:36px;text-align:right">0.00s</span>
+        </div>
+        <input type="range" id="subDelay" min="0" max="0.6" step="0.05" value="0">
+      </div>
+      <div class="field-row" style="font-size:11px;color:#86868b;margin-bottom:6px">字幕与划线同步淡入；0 表示同时开始</div>
+      </div>
+    </details>
+
+    <details class="acc">
+      <summary>导出</summary>
+      <div class="acc-body">
+      <div class="field">
+        <label>分辨率</label>
+        <select id="exportSize">
+          <option value="1920x1080">横屏 1920×1080</option>
+          <option value="1080x1920">竖屏 1080×1920</option>
+          <option value="3840x2160">横屏 4K 3840×2160</option>
+          <option value="2160x3840">竖屏 4K 2160×3840</option>
+          <option value="original">原图尺寸</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>帧率（PNG 序列 / 视频）</label>
+        <select id="exportFps">
+          <option value="30" selected>30 fps</option>
+          <option value="60">60 fps</option>
+          <option value="24">24 fps</option>
+        </select>
+      </div>
+      <div class="field" style="margin-top:8px">
+        <div class="field-row">
+          <label style="flex:1">结尾停留</label>
+          <span id="tailHoldVal" style="color:#6e6e73;width:52px;text-align:right">0.0s</span>
+        </div>
+        <input type="range" id="tailHoldRange" min="0" max="200" value="0" step="1">
+        <div style="font-size:11px;color:#86868b;margin-top:4px">划线结束后额外定格这么久再结束（0–20 秒，同时影响播放预览和导出）</div>
+      </div>
+      <div style="height:8px"></div>
+      <div class="play-controls">
+        <button class="btn primary" id="exportMovTransBtn">⭐ MOV 透明通道</button>
+      </div>
+      <div style="height:6px"></div>
+      <div class="play-controls">
+        <button class="btn" id="exportMovBgBtn">MOV 含背景</button>
+        <button class="btn" id="exportVideoBtn">MP4 含背景</button>
+      </div>
+      <div style="height:6px"></div>
+      <div class="play-controls">
+        <button class="btn" id="exportPngBgBtn">PNG 序列(含背景)</button>
+        <button class="btn" id="exportPngTransBtn">PNG 序列(透明)</button>
+      </div>
+      <div style="font-size:11px;color:#86868b;margin-top:6px;line-height:1.4">
+        ⭐ 推荐：MOV 透明通道 —— 纯 JS 打包，速度快、体积小，剪映/CapCut/Premiere/FCP 直接拖入使用
+      </div>
+      <div style="font-size:11px;color:#ff9500;margin-top:6px;line-height:1.4">
+        💡 透明 MOV 拖入剪辑后，把图层的<b>混合模式设为「正片叠底 / Multiply」</b>，荧光色就会落在文字下方。<br>
+        含背景版本（MOV 含背景 / MP4）已经直接做好该效果，拖入即可。
+      </div>
+      <div style="height:8px"></div>
+      <div class="progress-bar"><div class="progress-bar-fill" id="exportProgress"></div></div>
+      <div class="export-status" id="exportStatus"></div>
+      </div>
+    </details>
+  </aside>
+</div>
+
+<script>
+/* ===== 全局状态 ===== */
+const STATE = {
+  image: null,            // HTMLImageElement
+  imgW: 0, imgH: 0,
+  scale: 1,               // 显示缩放比例
+  marks: [],              // [{...mark, cam: 'hold'|'pan'|'zoom'}]
+  activeMarkId: null,
+  currentStyle: 'block',
+  currentColor: '#ffeb3b',
+  currentOpacity: 50,
+  currentThickness: 22,
+  currentRadius: 6,       // 色块 / 负片样式的圆角 px
+  currentDuration: 1.0,   // 动画时长（秒），同步作用于全部划线
+  markStartDelay: 0,      // 全局划线动画起始延迟（秒）—— 空白文献停留时间
+  cropRadius: 0,          // 裁切圆角（图像坐标像素）
+  ocrData: null,
+  ocrWorking: false,
+  tool: 'select',
+  playing: false,
+  // 裁切
+  cropRect: null,
+  // 镜头（保留最小状态以兼容 defaultCameraState）
+  previewTime: 0,
+  // ===== 翻译字幕 =====
+  subtitleEnabled: true,      // 是否在画面渲染译文字幕
+  subtitleFontSize: 28,       // 字幕字号（图像坐标 px）
+  subtitleFontColor: '#ffffff', // 字幕文字颜色
+  subtitleBold: true,         // 字幕是否粗体
+  subtitleDelay: 0,           // 字幕与划线同步，值>0 表示稍晚开始但仍在划线结束前完成
+  subtitleGap: 18,            // 字幕与划线底部间距（图像坐标 px）
+  // 底色块（替代原来的下划线，让字幕在任何背景上都清晰可读）
+  subtitleBgColor: '#000000', // 底色块颜色
+  subtitleBgOpacity: 70,      // 底色块透明度（0-100）
+  subtitlePadX: 18,           // 底色块横向内边距
+  subtitlePadY: 10,           // 底色块纵向内边距
+  subtitleRadius: 8,          // 底色块圆角
+  subtitleMode: 'combined',   // 'combined' = 所有译文合并成一块放在最末划线下方；'per-mark' = 每条划线下单独一条
+  subtitleCombinedGap: 24,    // 合并模式下，字幕块与最末划线底部的距离
+  // 字幕位置微调（相对于自动计算位置，图像坐标 px）
+  subtitleOffsetX: 0,
+  subtitleOffsetY: 0,
+  // 文字描边
+  subtitleStrokeColor: '#000000',
+  subtitleStrokeWidth: 0,     // 0 表示不描边
+  // 文字阴影
+  subtitleShadowColor: '#000000',
+  subtitleShadowBlur: 0,      // 0 表示不启用阴影
+  subtitleShadowOffsetX: 0,
+  subtitleShadowOffsetY: 0,
+  // 划线动画起始停留（秒）：空白文献先静止这么长时间后再开始划线
+  markStartDelay: 0,
+  // 划线动画结束后的停留（秒）：全部划线完成后，视频/预览再保持这么久再结束
+  tailHold: 0,
+  // 文献颜色反转：开启后整张文献整体反相（划线本身不反相）
+  invertDoc: false,
+  _invertedImage: null, // 反相后的离屏 canvas，作为 drawImage 源使用
+  // 划线辉光（外侧光晕）
+  markGlowEnabled: false,
+  markGlowBlur: 18,        // 模糊半径（图像坐标 px）
+  markGlowMode: 'auto',    // 'auto' = 跟随划线色，'custom' = 用 markGlowColor
+  markGlowColor: '#ffeb3b',
+  markGlowOpacity: 80,     // 0-100
+  // 透明文字背景：自动识别背景色（白底/黑底/彩色底通吃），按颜色距离把"接近背景的像素"抹成透明
+  transparentBg: false,
+  transparentThreshold: 80,          // 颜色距离阈值（20-220）：距离 ≤ 阈值视作背景
+  _transparentImage: null,           // 仅去背景的离屏 canvas
+  _invertedTransparentImage: null,   // 同时反相 + 去背景的离屏 canvas
+  // 画布上字幕 hit-test 用的矩形数组（每次 drawAllMarksFinal 重写）
+  _lastSubtitleRects: [],
+  translateTarget: 'zh-CN',   // 翻译目标语言
+  translating: false,         // 批量翻译中
+  /* 合并模式：把所有划线原文拼起来整段翻译，结果存这里。
+   * 用户改了划线（增删 / 编辑原文）后 stale=true，需要重新点"翻译全部"生成连贯译文 */
+  wholeTranslation: '',
+  wholeTranslationStale: false,
+  /* ===== 文献阴影 ===== */
+  docShadowEnabled: false,
+  docShadowBlur: 30,
+  docShadowOffsetX: 0,
+  docShadowOffsetY: 14,
+  docShadowColor: '#000000',
+  docShadowOpacity: 45,       // 0-100
+  // ===== 主文献入画动画 =====
+  // 入画类型：'none' | 'fade' | 'flip' | 'slide-left/right/top/bottom' | 'zoom'
+  // entranceDelay = 入画开始前的等待秒数；entranceDuration = 动画时长秒数
+  docEntrance: 'none',
+  docEntranceDelay: 0,
+  docEntranceDuration: 0.8,
+  // ===== 视频画布尺寸（导出 MOV 时的画幅）=====
+  // 'auto'  → 用原图尺寸，'16:9' → 1920×1080，'9:16' → 1080×1920
+  // 默认 16:9：导入文献时自动套上横屏画布并居中
+  videoAspect: '16:9',
+  // ===== 文献在视频画布内的位置与缩放（相对画布中心的偏移 + 整体缩放倍数）=====
+  // docScale=1 表示"文献最长边贴合画布对应最长边的 90%"，可放大缩小
+  docScale: 1,
+  docOffsetX: 0,   // 相对画布中心的 X 偏移（画布坐标 px）
+  docOffsetY: 0,
+  docRotation: 0,  // 主文献在画布平面内的旋转（度），与 3D 透视的 Z 轴旋转互不冲突（3D 关闭时独立生效）
+  // ===== 3D 透视旋转（度）=====
+  rotX: 0, rotY: 0, rotZ: 0,
+  // FOV 透视强度：越小越"扁"，越大越"广角鱼眼"。45° 是常见取值
+  perspectiveFov: 45,
+  // 3D 是否启用（关掉时 WebGL 管线不跑，直接拿 sceneCanvas 贴图复制到输出）
+  perspective3D: false,
+};
+
+/* ===== 撤回 / 重做 历史栈 =====
+ * 仅记录用户离散的"动作"，不记录每个键盘字符；输入框内的 Ctrl+Z 由浏览器原生处理。
+ * 一次快照包含：marks, cropRect, image 引用 + 尺寸, activeMarkId
+ */
+const HISTORY = { undo: [], redo: [], MAX: 50 };
+
+function snapshotState() {
+  return {
+    marks: STATE.marks.map(m => ({ ...m })),
+    cropRect: STATE.cropRect ? { ...STATE.cropRect } : null,
+    image: STATE.image,
+    imgW: STATE.imgW,
+    imgH: STATE.imgH,
+    activeMarkId: STATE.activeMarkId,
+    wholeTranslation: STATE.wholeTranslation || '',
+    wholeTranslationStale: !!STATE.wholeTranslationStale,
+  };
+}
+
+function pushHistory() {
+  HISTORY.undo.push(snapshotState());
+  if (HISTORY.undo.length > HISTORY.MAX) HISTORY.undo.shift();
+  HISTORY.redo = []; // 任何新动作会清空 redo 栈
+  updateHistoryButtons();
+}
+
+function applySnapshot(snap) {
+  const imageChanged = snap.image !== STATE.image;
+  STATE.marks = snap.marks.map(m => ({ ...m }));
+  STATE.cropRect = snap.cropRect ? { ...snap.cropRect } : null;
+  STATE.activeMarkId = snap.activeMarkId;
+  STATE.wholeTranslation = snap.wholeTranslation || '';
+  STATE.wholeTranslationStale = !!snap.wholeTranslationStale;
+  if (typeof updateWholeTranslationUI === 'function') updateWholeTranslationUI();
+  if (imageChanged && snap.image) {
+    STATE.image = snap.image;
+    STATE.imgW = snap.imgW;
+    STATE.imgH = snap.imgH;
+    rebindImageToCanvas();
+  }
+  renderMarksList();
+  drawAllMarksFinal();
+  if (STATE.cropRect && STATE.tool === 'crop') redrawCropOverlay();
+  else boxCtx.clearRect(0, 0, STATE.imgW, STATE.imgH);
+}
+
+function undo() {
+  if (!HISTORY.undo.length) return;
+  HISTORY.redo.push(snapshotState());
+  applySnapshot(HISTORY.undo.pop());
+  updateHistoryButtons();
+}
+
+function redo() {
+  if (!HISTORY.redo.length) return;
+  HISTORY.undo.push(snapshotState());
+  applySnapshot(HISTORY.redo.pop());
+  updateHistoryButtons();
+}
+
+function clearHistory() {
+  HISTORY.undo = [];
+  HISTORY.redo = [];
+  updateHistoryButtons();
+}
+
+function updateHistoryButtons() {
+  const u = $('undoBtn'), r = $('redoBtn');
+  if (!u || !r) return;
+  u.disabled = HISTORY.undo.length === 0;
+  r.disabled = HISTORY.redo.length === 0;
+  u.title = `撤回（Ctrl/Cmd + Z）${HISTORY.undo.length ? ' · 可退 ' + HISTORY.undo.length + ' 步' : ''}`;
+  r.title = `重做（Ctrl/Cmd + Shift + Z）${HISTORY.redo.length ? ' · 可前进 ' + HISTORY.redo.length + ' 步' : ''}`;
+}
+
+// 把已经加载好的 STATE.image 绑回画布尺寸，不重置 marks/keyframes
+function rebindImageToCanvas() {
+  layoutCanvasFrame();
+  imgCtx.drawImage(getDocSource(), 0, 0);
+  drawCtx.clearRect(0, 0, STATE.imgW, STATE.imgH);
+  boxCtx.clearRect(0, 0, STATE.imgW, STATE.imgH);
+}
+
+/* 根据 videoAspect + docScale + docOffset 布置中间预览区
+ * auto  → 画布贴合原图比例；文献铺满 wrap
+ * 16:9/9:16 → wrap 变成视频比例画板，文献按 docScale/docOffset 浮在其中 */
+function layoutCanvasFrame() {
+  if (!STATE.image) return;
+  updateExportSizeLabel();
+  const wrap = $('canvasWrap');
+  const group = $('canvasGroup');
+  const area = $('canvasArea');
+  const maxW = Math.max(200, area.clientWidth - 60);
+  const maxH = Math.max(200, area.clientHeight - 80);
+  // canvases 的 bitmap 永远保持原图分辨率（marks 存的是图像坐标）
+  [imgCanvas, drawCanvas, boxCanvas].forEach(c => {
+    if (c.width !== STATE.imgW || c.height !== STATE.imgH) {
+      c.width = STATE.imgW; c.height = STATE.imgH;
+    }
+  });
+  // 统一用"画框 + 文献浮于画框内"逻辑：auto 模式的画框就是原图尺寸，
+  // 16:9 / 9:16 模式的画框就是视频尺寸。这样 docScale / docOffset 在任何画布尺寸下都生效。
+  const isFrame = STATE.videoAspect === '16:9' || STATE.videoAspect === '9:16';
+  wrap.classList.toggle('frame-mode', isFrame);
+  const { w: exW, h: exH } = getExportSize();
+  const frameScale = Math.min(1, maxW / exW, maxH / exH);
+  const frameDispW = Math.round(exW * frameScale);
+  const frameDispH = Math.round(exH * frameScale);
+  const baseFit = getBaseDocFit(exW, exH);
+  const docFactor = baseFit * STATE.docScale;
+  const docDispW = Math.round(STATE.imgW * docFactor * frameScale);
+  const docDispH = Math.round(STATE.imgH * docFactor * frameScale);
+  const dx = (STATE.docOffsetX / 100) * (exW / 2) * frameScale;
+  const dy = (STATE.docOffsetY / 100) * (exH / 2) * frameScale;
+  const left = (frameDispW - docDispW) / 2 + dx;
+  const top = (frameDispH - docDispH) / 2 + dy;
+  [imgCanvas, drawCanvas, boxCanvas].forEach(c => {
+    c.style.width = '100%';
+    c.style.height = '100%';
+  });
+  group.style.width = docDispW + 'px';
+  group.style.height = docDispH + 'px';
+  group.style.left = left + 'px';
+  group.style.top = top + 'px';
+  wrap.style.width = frameDispW + 'px';
+  wrap.style.height = frameDispH + 'px';
+  STATE.scale = docDispW / STATE.imgW;
+  // 平面旋转：围绕 canvasGroup 的中心旋转；不修改宽高（旋转后的 bounding 超出部分由 canvasWrap overflow:hidden 裁掉）
+  group.style.transformOrigin = '50% 50%';
+  group.style.transform = STATE.docRotation ? ('rotate(' + STATE.docRotation + 'deg)') : '';
+}
+
+const PRESET_COLORS = [
+  '#ffeb3b', // 黄
+  '#a5d6a7', // 绿
+  '#f48fb1', // 粉
+  '#90caf9', // 蓝
+  '#ffab91', // 橙
+  '#ce93d8', // 紫
+  '#ff5252', // 红
+  '#ffffff', // 白（描边/手绘用）
+];
+
+/* ===== DOM 引用 ===== */
+const $ = id => document.getElementById(id);
+const imgCanvas = $('imgCanvas');
+const drawCanvas = $('drawCanvas');
+const boxCanvas = $('boxCanvas');
+const imgCtx = imgCanvas.getContext('2d');
+const drawCtx = drawCanvas.getContext('2d');
+const boxCtx = boxCanvas.getContext('2d');
+
+/* ===== 颜色面板 ===== */
+function renderColors() {
+  const palette = $('colorPalette');
+  palette.innerHTML = '';
+  PRESET_COLORS.forEach(c => {
+    const sw = document.createElement('div');
+    sw.className = 'color-swatch' + (c === STATE.currentColor ? ' active' : '');
+    sw.style.background = c;
+    sw.onclick = () => {
+      STATE.currentColor = c;
+      $('customColor').value = c;
+      renderColors();
+      applyStyleToActiveMark();
+    };
+    palette.appendChild(sw);
+  });
+}
+renderColors();
+
+$('customColor').addEventListener('input', e => {
+  STATE.currentColor = e.target.value;
+  renderColors();
+  applyStyleToActiveMark();
+});
+
+/* ===== 风格切换 ===== */
+document.querySelectorAll('.style-tab').forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll('.style-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    STATE.currentStyle = tab.dataset.style;
+    applyStyleToActiveMark();
+  };
+});
+
+/* ===== 透明度/粗细 ===== */
+$('opacityRange').addEventListener('input', e => {
+  STATE.currentOpacity = +e.target.value;
+  $('opacityVal').textContent = STATE.currentOpacity + '%';
+  applyStyleToActiveMark();
+});
+$('thicknessRange').addEventListener('input', e => {
+  STATE.currentThickness = +e.target.value;
+  $('thicknessVal').textContent = STATE.currentThickness + 'px';
+  applyStyleToActiveMark();
+});
+$('radiusRange').addEventListener('input', e => {
+  STATE.currentRadius = +e.target.value;
+  $('radiusVal').textContent = STATE.currentRadius + 'px';
+  applyStyleToActiveMark();
+});
+$('durationRange').addEventListener('input', e => {
+  // 滑杆 2..50 映射成 0.2..5.0 秒
+  STATE.currentDuration = +e.target.value / 10;
+  $('durationVal').textContent = STATE.currentDuration.toFixed(1) + 's';
+  applyDurationToAllMarks();
+});
+$('startDelayRange').addEventListener('input', e => {
+  // 滑杆 0..50 映射成 0.0..5.0 秒
+  STATE.markStartDelay = +e.target.value / 10;
+  $('startDelayVal').textContent = STATE.markStartDelay.toFixed(1) + 's';
+});
+$('tailHoldRange').addEventListener('input', e => {
+  // 滑杆 0..200 映射成 0.0..20.0 秒
+  STATE.tailHold = +e.target.value / 10;
+  $('tailHoldVal').textContent = STATE.tailHold.toFixed(1) + 's';
+});
+
+// 文献颜色反转：开关
+$('invertDoc').addEventListener('change', e => {
+  pushHistory();
+  STATE.invertDoc = !!e.target.checked;
+  if (STATE.invertDoc && !STATE._invertedImage && STATE.image) rebuildInvertedImage();
+  // 反相变化时，反相+透明背景的合成图也要重建
+  if (STATE.transparentBg && STATE.image) rebuildTransparentImages();
+  // 切换 canvas-wrap 上的 .invert-doc 类，触发 #drawCanvas 的 mix-blend-mode 从 multiply 切到 screen，
+  // 让黄/绿/粉等纯色荧光在黑底上以"加色"方式显示
+  const wrap = $('canvasWrap');
+  if (wrap) wrap.classList.toggle('invert-doc', STATE.invertDoc);
+  // 重画整个预览（编辑画布 + 3D 预览）
+  if (STATE.image) {
+    imgCtx.clearRect(0, 0, STATE.imgW, STATE.imgH);
+    imgCtx.drawImage(getDocSource(), 0, 0);
+    drawAllMarksFinal();
+    if (STATE.perspective3D) scheduleGLPreview();
+  }
+});
+
+// 纯文字透明背景：开关
+$('transparentBg').addEventListener('change', e => {
+  pushHistory();
+  STATE.transparentBg = !!e.target.checked;
+  if (STATE.transparentBg && STATE.image) rebuildTransparentImages();
+  const wrap = $('canvasWrap');
+  if (wrap) wrap.classList.toggle('transparent-bg', STATE.transparentBg);
+  if (STATE.image) {
+    imgCtx.clearRect(0, 0, STATE.imgW, STATE.imgH);
+    imgCtx.drawImage(getDocSource(), 0, 0);
+    drawAllMarksFinal();
+    if (STATE.perspective3D) scheduleGLPreview();
+  }
+});
+
+// 透明背景的去背景强度（颜色距离阈值）
+$('transparentThreshold').addEventListener('input', e => {
+  STATE.transparentThreshold = parseInt(e.target.value, 10) || 80;
+  $('transparentThresholdVal').textContent = STATE.transparentThreshold;
+  // 阈值变化只在透明开启时才需要实时重建
+  if (STATE.transparentBg && STATE.image) {
+    rebuildTransparentImages();
+    imgCtx.clearRect(0, 0, STATE.imgW, STATE.imgH);
+    imgCtx.drawImage(getDocSource(), 0, 0);
+    drawAllMarksFinal();
+    if (STATE.perspective3D) scheduleGLPreview();
+  }
+});
+
+// 划线辉光相关
+$('markGlowEnabled').addEventListener('change', e => {
+  STATE.markGlowEnabled = !!e.target.checked;
+  drawAllMarksFinal();
+});
+$('markGlowBlur').addEventListener('input', e => {
+  STATE.markGlowBlur = parseInt(e.target.value, 10) || 0;
+  $('markGlowBlurVal').textContent = STATE.markGlowBlur + 'px';
+  drawAllMarksFinal();
+});
+$('markGlowMode').addEventListener('change', e => {
+  STATE.markGlowMode = e.target.value;
+  drawAllMarksFinal();
+});
+$('markGlowColor').addEventListener('input', e => {
+  STATE.markGlowColor = e.target.value;
+  // 选了颜色就默认认为是"自定义"模式，否则用户切到 custom 还得再点一次
+  if (STATE.markGlowMode !== 'custom') {
+    STATE.markGlowMode = 'custom';
+    $('markGlowMode').value = 'custom';
+  }
+  drawAllMarksFinal();
+});
+$('markGlowOpacity').addEventListener('input', e => {
+  STATE.markGlowOpacity = parseInt(e.target.value, 10);
+  $('markGlowOpacityVal').textContent = STATE.markGlowOpacity + '%';
+  drawAllMarksFinal();
+});
+
+/* 样式变化统一作用到：
+ *  - 当前激活的划线（若有）
+ *  - 其它所有划线（保证"第一条划线"也能跟着一起更新）
+ */
+function applyStyleToActiveMark() {
+  if (!STATE.marks.length) return;
+  STATE.marks.forEach(mark => {
+    mark.color = STATE.currentColor;
+    mark.opacity = STATE.currentOpacity;
+    mark.thickness = STATE.currentThickness;
+    mark.radius = STATE.currentRadius;
+    mark.style = STATE.currentStyle;
+  });
+  renderMarksList();
+  drawAllMarksFinal();
+}
+
+/* 更新所有划线的动画时长，并相应重排 delay（保证串行播放不串场） */
+function applyDurationToAllMarks() {
+  if (!STATE.marks.length) return;
+  let acc = 0;
+  STATE.marks.forEach(mark => {
+    mark.duration = STATE.currentDuration;
+    mark.delay = acc;
+    acc += STATE.currentDuration;
+  });
+  renderMarksList();
+  drawAllMarksFinal();
+}
+
+/* ===== 工具切换 ===== */
+document.querySelectorAll('.tool-btn[data-tool]').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('.tool-btn[data-tool]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    STATE.tool = btn.dataset.tool;
+    const cursorMap = { select: 'crosshair', crop: 'crosshair' };
+    boxCanvas.style.cursor = cursorMap[STATE.tool] || 'default';
+    // 裁切模式：显示"应用/取消"按钮
+    $('applyCropBtn').style.display = STATE.tool === 'crop' ? 'inline-block' : 'none';
+    $('cancelCropBtn').style.display = STATE.tool === 'crop' ? 'inline-block' : 'none';
+    $('cropRadiusWrap').style.display = STATE.tool === 'crop' ? 'inline-flex' : 'none';
+    if (STATE.tool !== 'crop') { STATE.cropRect = null; redrawCropOverlay(); }
+    // 切到 select 时画出激活划线的句柄
+    if (STATE.tool === 'select') { boxCtx.clearRect(0, 0, STATE.imgW, STATE.imgH); drawActiveMarkHandles(); }
+  };
+});
+$('applyCropBtn').onclick = applyCrop;
+$('cancelCropBtn').onclick = () => {
+  STATE.cropRect = null; redrawCropOverlay();
+};
+$('cropRadiusRange').addEventListener('input', e => {
+  STATE.cropRadius = parseInt(e.target.value, 10);
+  $('cropRadiusVal').textContent = STATE.cropRadius + 'px';
+  redrawCropOverlay();
+});
+$('undoBtn').onclick = undo;
+$('redoBtn').onclick = redo;
+// 全局快捷键：Ctrl/Cmd + Z 撤回，Ctrl/Cmd + Shift + Z 或 Ctrl/Cmd + Y 重做
+window.addEventListener('keydown', e => {
+  if (!(e.metaKey || e.ctrlKey)) return;
+  const tag = e.target && e.target.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable)) return;
+  const k = e.key.toLowerCase();
+  if (k === 'z') {
+    e.preventDefault();
+    if (e.shiftKey) redo(); else undo();
+  } else if (k === 'y') {
+    e.preventDefault();
+    redo();
+  }
+});
+
+/* ===== 上传图片 ===== */
+const uploadArea = $('uploadArea');
+const fileInput = $('fileInput');
+
+// 注：uploadArea 是 <label>，会自动触发内部 <input type="file">.click()
+// 之前额外加了 click 监听 → 同一次点击触发两次，所以文件选择框出现两次。
+fileInput.addEventListener('change', e => {
+  if (e.target.files[0]) loadImageFile(e.target.files[0]);
+});
+['dragover', 'dragenter'].forEach(ev => uploadArea.addEventListener(ev, e => {
+  e.preventDefault(); uploadArea.classList.add('drag');
+}));
+['dragleave', 'drop'].forEach(ev => uploadArea.addEventListener(ev, e => {
+  e.preventDefault(); uploadArea.classList.remove('drag');
+}));
+uploadArea.addEventListener('drop', e => {
+  if (e.dataTransfer.files[0]) loadImageFile(e.dataTransfer.files[0]);
+});
+window.addEventListener('paste', e => {
+  for (const item of e.clipboardData.items) {
+    if (item.type.startsWith('image/')) {
+      loadImageFile(item.getAsFile());
+      return;
+    }
+  }
+});
+
+function loadImageFile(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => setupImage(img);
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+/* ===== URL 抓取（两种模式） ===== */
+$('fetchUrlBtn').onclick = () => fetchUrl();
+$('urlInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') fetchUrl();
+});
+async function fetchUrl() {
+  let url = $('urlInput').value.trim();
+  if (!url) return;
+  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+  const mode = $('urlMode').value;
+  const btn = $('fetchUrlBtn');
+  const status = $('urlStatus');
+  btn.disabled = true;
+  try {
+    if (mode === 'reader') {
+      await fetchViaJinaReader(url, status);
+    } else {
+      await fetchViaScreenshot(url, status);
+    }
+  } catch (err) {
+    status.innerHTML = '❌ ' + err.message + ' <br>建议：切换模式/手动截图上传';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ---- 模式1：网页截图（microlink 主，thum.io 备选，+ 验证页检测） ---- */
+async function fetchViaScreenshot(url, status) {
+  status.textContent = '⏳ 抓取长截图中（通常 10-30 秒）...';
+  let img = null;
+  let lastErr = null;
+  // 尝试 microlink
+  try {
+    const api = `https://api.microlink.io/?url=${encodeURIComponent(url)}&screenshot=true&meta=false&fullPage=true&type=png&overlay.browser=false&viewport.width=1280`;
+    const res = await fetch(api);
+    if (!res.ok) throw new Error('microlink ' + res.status);
+    const json = await res.json();
+    if (json.status !== 'success' || !json.data?.screenshot?.url) throw new Error('microlink 无数据');
+    img = await loadImage(json.data.screenshot.url);
+  } catch (err) { lastErr = err; }
+
+  // microlink 失败 → 尝试 thum.io 备选
+  if (!img) {
+    status.textContent = '⏳ 主服务失败，切备选 thum.io...';
+    try {
+      const thumUrl = `https://image.thum.io/get/width/1280/png/noanimate/${url}`;
+      img = await loadImage(thumUrl);
+    } catch (err) { lastErr = err; }
+  }
+  if (!img) throw lastErr || new Error('所有截图服务均失败');
+
+  // 验证页检测
+  const captcha = detectCaptcha(img);
+  setupImage(img);
+  if (captcha) {
+    status.innerHTML = `⚠ 截图成功但<b>疑似验证页</b>（${img.naturalWidth}×${img.naturalHeight}px, ${captcha}）<br>建议切换到"正文提取"模式，或浏览器手动截图后上传`;
+  } else {
+    status.textContent = `✓ 截图成功：${img.naturalWidth}×${img.naturalHeight}px`;
+  }
+}
+
+function loadImage(src) {
+  return new Promise((ok, fail) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => ok(img);
+    img.onerror = () => fail(new Error('图片加载失败: ' + src.slice(0, 60)));
+    img.src = src;
+  });
+}
+
+// 验证页启发式检测：图片太矮（验证页通常 < 1200px）或顶部有大片 reCAPTCHA 蓝
+function detectCaptcha(img) {
+  const reasons = [];
+  if (img.naturalHeight < 1200) reasons.push(`高度仅 ${img.naturalHeight}px 可能不完整`);
+  // 采样顶部 RGB
+  try {
+    const c = document.createElement('canvas');
+    c.width = Math.min(200, img.naturalWidth);
+    c.height = Math.min(200, img.naturalHeight);
+    const cx = c.getContext('2d');
+    cx.drawImage(img, 0, 0);
+    const data = cx.getImageData(0, 0, c.width, c.height).data;
+    let bluePx = 0, total = 0;
+    for (let i = 0; i < data.length; i += 16) {
+      const r = data[i], g = data[i+1], b = data[i+2];
+      total++;
+      // reCAPTCHA 蓝 ~#4285F4 / #1A73E8
+      if (b > 200 && r < 130 && g < 180 && b > r + 40) bluePx++;
+    }
+    if (total && bluePx / total > 0.15) reasons.push('顶部大面积 reCAPTCHA 蓝');
+  } catch {}
+  return reasons.length ? reasons.join(' + ') : null;
+}
+
+/* ---- 模式2：Jina Reader 正文提取 → Canvas 渲染 ---- */
+async function fetchViaJinaReader(url, status) {
+  status.textContent = '⏳ Jina Reader 抓取正文中（通常 5-15 秒）...';
+  // Jina 免费端点，支持 CORS
+  const res = await fetch('https://r.jina.ai/' + url, {
+    headers: { 'X-Retain-Images': 'none', 'Accept': 'text/plain' }
+  });
+  if (!res.ok) throw new Error('Jina Reader ' + res.status + '（此站点可能不支持）');
+  const md = await res.text();
+  if (!md || md.length < 100) throw new Error('Jina 返回内容过短，可能是空页');
+  status.textContent = '⏳ 排版渲染中...';
+  const img = await renderMarkdownToImage(md);
+  setupImage(img);
+  status.textContent = `✓ 正文提取成功：${img.naturalWidth}×${img.naturalHeight}px，${md.length} 字`;
+}
+
+/* 把 markdown 渲染为论文样式的图片 */
+async function renderMarkdownToImage(md) {
+  // 1) 清洗 markdown：去掉图片占位、URL、多余符号，但保留文字结构
+  let text = md
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')             // 图片
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')          // 链接 → 保留文本
+    .replace(/^Title:\s*(.*)$/im, '# $1')             // Jina 常见 Title:
+    .replace(/^URL Source:.*$/im, '')                  // 去掉 URL Source:
+    .replace(/^Markdown Content:\s*/im, '')            // 去掉 Markdown Content:
+    .replace(/^Published Time:.*$/im, '')
+    .replace(/`([^`]+)`/g, '$1')                       // 行内 code
+    .replace(/^\s*>\s?/gm, '    ')                     // 引用 → 缩进
+    .replace(/\n{3,}/g, '\n\n');
+
+  // 2) 分块
+  const blocks = text.split('\n').map(line => {
+    const s = line.trimEnd();
+    if (/^#\s+/.test(s)) return { type: 'h1', text: s.replace(/^#\s+/, '') };
+    if (/^##\s+/.test(s)) return { type: 'h2', text: s.replace(/^##\s+/, '') };
+    if (/^###\s+/.test(s)) return { type: 'h3', text: s.replace(/^###\s+/, '') };
+    if (/^\s*[-*]\s+/.test(s)) return { type: 'li', text: s.replace(/^\s*[-*]\s+/, '') };
+    if (/^\s*\d+\.\s+/.test(s)) return { type: 'li', text: s.replace(/^\s*\d+\.\s+/, '• ') };
+    if (!s.trim()) return { type: 'gap' };
+    return { type: 'p', text: s };
+  });
+
+  // 3) 布局参数
+  const W = 1200, padding = 80;
+  const maxW = W - padding * 2;
+  const STYLE = {
+    h1: { font: 'bold 40px -apple-system, "PingFang SC", sans-serif', color: '#1d1d1f', lineH: 54, after: 24 },
+    h2: { font: 'bold 30px -apple-system, "PingFang SC", sans-serif', color: '#1d1d1f', lineH: 42, after: 16 },
+    h3: { font: 'bold 24px -apple-system, "PingFang SC", sans-serif', color: '#1d1d1f', lineH: 34, after: 10 },
+    p:  { font: '20px -apple-system, "PingFang SC", sans-serif',     color: '#2c2c2e', lineH: 32, after: 12 },
+    li: { font: '20px -apple-system, "PingFang SC", sans-serif',     color: '#2c2c2e', lineH: 32, after: 6, indent: 28 },
+    gap:{ lineH: 16 }
+  };
+
+  // 4) 测量：每块分行 + 累计高度
+  const meas = document.createElement('canvas').getContext('2d');
+  let total = padding;
+  const prepared = [];
+  for (const b of blocks) {
+    if (b.type === 'gap') {
+      prepared.push({ ...b, lines: [], h: STYLE.gap.lineH });
+      total += STYLE.gap.lineH; continue;
+    }
+    const st = STYLE[b.type];
+    meas.font = st.font;
+    const indent = st.indent || 0;
+    const lines = wrapText(meas, b.text, maxW - indent);
+    const h = lines.length * st.lineH + st.after;
+    prepared.push({ ...b, lines, h, indent });
+    total += h;
+  }
+  total += padding;
+
+  // 5) 画板 & 绘制
+  const H = Math.max(total, 800);
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  // 论文白底 + 轻微纹理（细微灰色顶部条）
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, W, H);
+  // 顶栏
+  ctx.fillStyle = '#f5f5f7';
+  ctx.fillRect(0, 0, W, 4);
+
+  let y = padding;
+  ctx.textBaseline = 'top';
+  for (const b of prepared) {
+    if (b.type === 'gap') { y += b.h; continue; }
+    const st = STYLE[b.type];
+    ctx.font = st.font;
+    ctx.fillStyle = st.color;
+    const x = padding + (b.indent || 0);
+    for (const line of b.lines) {
+      ctx.fillText(b.type === 'li' ? '•  ' + line : line, x, y);
+      y += st.lineH;
+    }
+    y += st.after;
+  }
+
+  // 6) 转成 Image
+  const dataUrl = canvas.toDataURL('image/png');
+  return loadImage(dataUrl);
+}
+
+// 中英文混排换行：中文按字符，英文按单词
+function wrapText(ctx, text, maxWidth) {
+  if (!text) return [''];
+  const lines = [];
+  let cur = '';
+  // 把文本分成"token"：英文单词 | 中文字符 | 空格
+  const tokens = [];
+  let buf = '';
+  for (const ch of text) {
+    if (/[\u4e00-\u9fa5\u3000-\u303f\uff00-\uffef]/.test(ch)) {
+      if (buf) { tokens.push(buf); buf = ''; }
+      tokens.push(ch);
+    } else if (/\s/.test(ch)) {
+      if (buf) { tokens.push(buf); buf = ''; }
+      tokens.push(' ');
+    } else {
+      buf += ch;
+    }
+  }
+  if (buf) tokens.push(buf);
+
+  for (const tok of tokens) {
+    const test = cur + tok;
+    if (ctx.measureText(test).width > maxWidth && cur) {
+      lines.push(cur.trimEnd());
+      cur = tok === ' ' ? '' : tok;
+    } else {
+      cur = test;
+    }
+  }
+  if (cur) lines.push(cur.trimEnd());
+  return lines.length ? lines : [''];
+}
+
+/* ===== 文献颜色反转 / 纯文字透明背景 =====
+ * STATE.image 永远是原图，不去改。下列离屏 canvas 是不同视觉模式下的"实际绘制源"：
+ *  - _invertedImage：整图反相
+ *  - _transparentImage：按亮度阈值把背景像素抹成透明（黑字保留、纸面变空）
+ *  - _invertedTransparentImage：先反相再去背景（白字 + 透明背景）
+ * 渲染管线统一通过 getDocSource() 取真正要画的位图，所有路径（编辑、预览、导出、3D、负片划线）一并生效。 */
+function rebuildInvertedImage() {
+  if (!STATE.image) { STATE._invertedImage = null; return; }
+  const c = document.createElement('canvas');
+  c.width = STATE.imgW; c.height = STATE.imgH;
+  const cx = c.getContext('2d');
+  cx.filter = 'invert(100%)';
+  cx.drawImage(STATE.image, 0, 0);
+  cx.filter = 'none';
+  STATE._invertedImage = c;
+}
+
+/* 自动识别一张文献图的"背景色" —— 采样四个角和四条边的中点，
+ * 取中位数作为代表色。这样不论是白纸（亮）、黑底（暗）、米色书页、彩色海报，
+ * 都能拿到一个稳定的背景色估计，纯文字透明背景就能通用任何底色。 */
+function detectBackgroundColor(srcCanvasOrImg) {
+  const w = srcCanvasOrImg.width || STATE.imgW;
+  const h = srcCanvasOrImg.height || STATE.imgH;
+  const off = document.createElement('canvas');
+  // 缩到 100×100 取样足够代表整图，又便宜
+  const ow = Math.min(100, w), oh = Math.min(100, h);
+  off.width = ow; off.height = oh;
+  const cx = off.getContext('2d');
+  cx.drawImage(srcCanvasOrImg, 0, 0, ow, oh);
+  let id;
+  try { id = cx.getImageData(0, 0, ow, oh); }
+  catch (e) { return [255, 255, 255]; } // 跨域兜底（默认白底）
+  const d = id.data;
+  const samples = [];
+  // 8 个采样点：四角 + 四边中点 + 留 ~5% 内缩，避开边缘的扫描伪影
+  const m = Math.max(2, Math.floor(Math.min(ow, oh) * 0.05));
+  const pts = [
+    [m, m], [ow - 1 - m, m], [m, oh - 1 - m], [ow - 1 - m, oh - 1 - m],
+    [Math.floor(ow / 2), m], [Math.floor(ow / 2), oh - 1 - m],
+    [m, Math.floor(oh / 2)], [ow - 1 - m, Math.floor(oh / 2)],
+  ];
+  for (const [x, y] of pts) {
+    const idx = (y * ow + x) * 4;
+    samples.push([d[idx], d[idx + 1], d[idx + 2]]);
+  }
+  // 取每个通道的中位数，避免某个角刚好落在文字上时被拉偏
+  const median = ch => {
+    const arr = samples.map(s => s[ch]).sort((a, b) => a - b);
+    return arr[Math.floor(arr.length / 2)];
+  };
+  return [median(0), median(1), median(2)];
+}
+
+/* 把一张位图按"颜色距离背景色"算法抹成透明：
+ *  - 像素颜色 ≈ 背景色 → 完全透明
+ *  - 像素颜色 ≠ 背景色 → 保留（=文字字形 / 划线 / 图形）
+ *  - 中间区间线性渐变，保留抗锯齿边缘
+ * 这样不论文献是白底黑字、黑底白字、还是彩色底，都能正确去掉背景。 */
+function makeTransparentBgCanvas(srcCanvasOrImg) {
+  if (!srcCanvasOrImg) return null;
+  const w = STATE.imgW, h = STATE.imgH;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const cx = c.getContext('2d');
+  cx.drawImage(srcCanvasOrImg, 0, 0, w, h);
+  let id;
+  try { id = cx.getImageData(0, 0, w, h); }
+  catch (e) { console.warn('图像跨域，无法读取像素，纯文字透明背景将退化成原图', e); return c; }
+  const d = id.data;
+  const [br, bg, bb] = detectBackgroundColor(srcCanvasOrImg);
+  // tol：颜色距离阈值（0-255）。距离 ≤ lo 全透明，距离 ≥ hi 全保留，
+  // 中间线性过渡保留抗锯齿。
+  const hi = Math.max(20, Math.min(220, +STATE.transparentThreshold || 80));
+  const lo = hi * 0.4;
+  const range = Math.max(1, hi - lo);
+  for (let i = 0; i < d.length; i += 4) {
+    const dr = d[i] - br;
+    const dg = d[i + 1] - bg;
+    const db = d[i + 2] - bb;
+    const dist = Math.sqrt(dr * dr + dg * dg + db * db);
+    if (dist <= lo) {
+      d[i + 3] = 0;
+    } else if (dist < hi) {
+      const t = (dist - lo) / range;
+      d[i + 3] = Math.round(d[i + 3] * t);
+    }
+    // dist >= hi → 保留原 alpha（文字主体）
+  }
+  cx.putImageData(id, 0, 0);
+  return c;
+}
+
+function rebuildTransparentImages() {
+  if (!STATE.image) {
+    STATE._transparentImage = null;
+    STATE._invertedTransparentImage = null;
+    return;
+  }
+  STATE._transparentImage = makeTransparentBgCanvas(STATE.image);
+  // 反相版基于已经 rebuildInvertedImage 后的 _invertedImage
+  STATE._invertedTransparentImage = STATE._invertedImage
+    ? makeTransparentBgCanvas(STATE._invertedImage)
+    : null;
+}
+
+function getDocSource() {
+  if (STATE.transparentBg) {
+    if (STATE.invertDoc && STATE._invertedTransparentImage) return STATE._invertedTransparentImage;
+    if (STATE._transparentImage) return STATE._transparentImage;
+  }
+  if (STATE.invertDoc && STATE._invertedImage) return STATE._invertedImage;
+  return STATE.image;
+}
+
+function setupImage(img) {
+  const isCropApply = STATE.cropRect !== null;
+  STATE.image = img;
+  STATE.imgW = img.naturalWidth;
+  STATE.imgH = img.naturalHeight;
+  // 新图载入后重建反相 + 透明背景离屏 canvas，下面所有 drawImage 路径都会通过 getDocSource() 走它
+  rebuildInvertedImage();
+  if (STATE.transparentBg) rebuildTransparentImages();
+  // 导入新文献时（不是裁切落地）→ 默认 16:9 画布 + 居中 + 原尺寸
+  if (!isCropApply) {
+    STATE.videoAspect = '16:9';
+    STATE.docScale = 1;
+    STATE.docOffsetX = 0;
+    STATE.docOffsetY = 0;
+    STATE.docRotation = 0;
+    // 同步 UI 控件，让右侧滑杆、下拉、顶部按钮组都对齐
+    if ($('videoAspect')) $('videoAspect').value = '16:9';
+    if ($('docScale')) { $('docScale').value = 100; $('docScaleVal').textContent = '100%'; }
+    if ($('docOffsetX')) { $('docOffsetX').value = 0; $('docOffsetXVal').textContent = '0'; }
+    if ($('docOffsetY')) { $('docOffsetYVal').textContent = '0'; $('docOffsetY').value = 0; }
+    if ($('docRotation')) { $('docRotation').value = 0; $('docRotationVal').textContent = '0°'; }
+    // 主文献入画动画：切换新文献时重置
+    STATE.docEntrance = 'none';
+    STATE.docEntranceDelay = 0;
+    STATE.docEntranceDuration = 0.8;
+    if ($('docEntrance')) $('docEntrance').value = 'none';
+    if ($('docEntranceDelay')) { $('docEntranceDelay').value = 0; $('docEntranceDelayVal').textContent = '0.0s'; }
+    if ($('docEntranceDur')) { $('docEntranceDur').value = 8; $('docEntranceDurVal').textContent = '0.8s'; }
+    if (typeof syncAspectButtons === 'function') syncAspectButtons();
+    // 顶部画布尺寸切换条变可见
+    const bar = $('aspectSwitchBar');
+    if (bar) bar.style.display = 'flex';
+  }
+  // 新图载入后重新贴上阴影 CSS（切换图片时 wrap/group DOM 可能尺寸变化）
+  if (typeof applyDocShadowCSS === 'function') applyDocShadowCSS();
+  if (!isCropApply) {
+    STATE.marks = [];
+    // 新图片 → 清空历史（旧历史引用的是旧图的坐标，已经无效）
+    clearHistory();
+  }
+  STATE.cropRect = null;
+  STATE.activeMarkId = null;
+  STATE.ocrData = null;
+
+  // 根据 videoAspect 决定是"原图比例"还是"视频画板"布局
+  layoutCanvasFrame();
+
+  imgCtx.drawImage(img, 0, 0);
+  drawCtx.clearRect(0, 0, STATE.imgW, STATE.imgH);
+  boxCtx.clearRect(0, 0, STATE.imgW, STATE.imgH);
+
+  $('canvasEmpty').style.display = 'none';
+  $('canvasWrap').style.display = 'block';
+  // 同步反相状态到 canvas-wrap，让 #drawCanvas 的 blend mode 与当前底图一致
+  $('canvasWrap').classList.toggle('invert-doc', !!STATE.invertDoc);
+  $('canvasToolbar').style.display = 'flex';
+  const po = $('previewOverlay'); if (po) po.style.display = 'flex';
+  $('searchBtn').disabled = false;
+  $('ocrStatus').textContent = '图片已加载，可框选或搜索关键词（首次搜索会下载 OCR 模型，约 10-15MB）';
+  renderMarksList();
+  // 如果已经打开了 3D 预览，载入新图时也刷新一下
+  if (STATE.perspective3D && typeof applyGLModeClass === 'function') {
+    applyGLModeClass();
+    renderGLPreviewNow();
+  }
+}
+
+/* ===== 鼠标框选 ===== */
+let dragging = false, startX = 0, startY = 0;
+function getCanvasPos(e) {
+  const rect = boxCanvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) / rect.width * STATE.imgW;
+  const y = (e.clientY - rect.top) / rect.height * STATE.imgH;
+  return { x, y };
+}
+
+// ===== 裁切框：draw / move / resize 状态机 =====
+let cropDragMode = null;     // null | 'draw' | 'move' | 'resize'
+let cropResizeHandle = null; // 'nw'|'n'|'ne'|'e'|'se'|'s'|'sw'|'w'
+let cropInitRect = null;     // 拖拽开始时的快照
+
+// ===== 划线框：move / resize 状态机（在 select 工具下拖动已有划线） =====
+let markDragMode = null;        // null | 'move' | 'resize'
+let markResizeHandle = null;    // 'nw'|'n'|'ne'|'e'|'se'|'s'|'sw'|'w'
+let markInitRect = null;        // 拖拽开始时划线的 {x,y,w,h}
+let markDragId = null;          // 正在拖的划线 id
+let markPushedHistory = false;  // 本次拖拽是否已经 pushHistory 过
+
+// ===== 字幕框：move / resize 状态机（在 select 工具下直接拖动画布上的字幕） =====
+let subDragMode = null;         // null | 'move' | 'resize'
+let subResizeHandle = null;     // 'nw' | 'ne' | 'se' | 'sw'
+let subInitOffsetX = 0;         // 拖拽开始时的 offsetX
+let subInitOffsetY = 0;
+let subInitFontSize = 28;       // 拖拽开始时的 fontSize
+let subInitRect = null;         // 拖拽开始时的 {x,y,w,h}（用于 resize 参考）
+let subPushedHistory = false;   // 本次字幕拖拽是否已经 pushHistory 过
+
+function hitSubtitleHandle(px, py, rect) {
+  // 四角缩放句柄（保留足够大的命中半径，屏幕坐标换算成图像坐标）
+  const H = handleSizeImg() * 1.2;
+  const half = H / 2;
+  const corners = {
+    nw: [rect.x, rect.y],
+    ne: [rect.x + rect.w, rect.y],
+    se: [rect.x + rect.w, rect.y + rect.h],
+    sw: [rect.x, rect.y + rect.h],
+  };
+  for (const [k, [hx, hy]] of Object.entries(corners)) {
+    if (Math.abs(px - hx) <= half && Math.abs(py - hy) <= half) return k;
+  }
+  return null;
+}
+function hitSubtitleBody(px, py, rect) {
+  return px >= rect.x && px <= rect.x + rect.w && py >= rect.y && py <= rect.y + rect.h;
+}
+function hitAnySubtitle(px, py) {
+  const rects = STATE._lastSubtitleRects || [];
+  // 反向遍历（最后绘制的在最上层，应先命中）
+  for (let i = rects.length - 1; i >= 0; i--) {
+    const r = rects[i];
+    const h = hitSubtitleHandle(px, py, r);
+    if (h) return { rect: r, hit: h };
+    if (hitSubtitleBody(px, py, r)) return { rect: r, hit: 'body' };
+  }
+  return null;
+}
+function cursorForSubtitle(kind) {
+  switch (kind) {
+    case 'body': return 'move';
+    case 'nw': case 'se': return 'nwse-resize';
+    case 'ne': case 'sw': return 'nesw-resize';
+    default: return 'crosshair';
+  }
+}
+
+function hitMarkHandle(x, y, m) {
+  if (!m) return null;
+  const H = handleSizeImg();
+  const half = H / 2;
+  const handles = {
+    nw: [m.x, m.y],
+    n:  [m.x + m.w / 2, m.y],
+    ne: [m.x + m.w, m.y],
+    e:  [m.x + m.w, m.y + m.h / 2],
+    se: [m.x + m.w, m.y + m.h],
+    s:  [m.x + m.w / 2, m.y + m.h],
+    sw: [m.x, m.y + m.h],
+    w:  [m.x, m.y + m.h / 2],
+  };
+  for (const name in handles) {
+    const [hx, hy] = handles[name];
+    if (Math.abs(x - hx) <= half && Math.abs(y - hy) <= half) return name;
+  }
+  if (x >= m.x && x <= m.x + m.w && y >= m.y && y <= m.y + m.h) return 'body';
+  return null;
+}
+
+// 在当前所有划线里查找命中（优先 active mark，然后按倒序找最上层）
+function hitAnyMark(x, y) {
+  const active = STATE.marks.find(mm => mm.id === STATE.activeMarkId);
+  if (active) {
+    const h = hitMarkHandle(x, y, active);
+    if (h) return { mark: active, hit: h };
+  }
+  for (let i = STATE.marks.length - 1; i >= 0; i--) {
+    const m = STATE.marks[i];
+    if (m.id === STATE.activeMarkId) continue;
+    const h = hitMarkHandle(x, y, m);
+    if (h) return { mark: m, hit: h };
+  }
+  return null;
+}
+
+function cursorForMark(hit) {
+  switch (hit) {
+    case 'nw': case 'se': return 'nwse-resize';
+    case 'ne': case 'sw': return 'nesw-resize';
+    case 'n': case 's':   return 'ns-resize';
+    case 'e': case 'w':   return 'ew-resize';
+    case 'body':          return 'move';
+    default:              return 'crosshair';
+  }
+}
+
+// 画当前激活划线的句柄（在 select 工具下、编辑时提示可拖动）
+function drawActiveMarkHandles() {
+  if (STATE.tool !== 'select') return;
+  // 每次绘制前先清掉 boxCtx，避免拖动过程中句柄/虚线框重影
+  boxCtx.clearRect(0, 0, STATE.imgW, STATE.imgH);
+  const m = STATE.marks.find(x => x.id === STATE.activeMarkId);
+  if (!m) return;
+  const H = handleSizeImg();
+  boxCtx.save();
+  boxCtx.strokeStyle = '#007aff';
+  boxCtx.lineWidth = 1.5 / (STATE.scale || 1);
+  boxCtx.setLineDash([5 / (STATE.scale || 1), 3 / (STATE.scale || 1)]);
+  boxCtx.strokeRect(m.x, m.y, m.w, m.h);
+  boxCtx.setLineDash([]);
+  const pts = [
+    [m.x, m.y], [m.x + m.w / 2, m.y], [m.x + m.w, m.y],
+    [m.x + m.w, m.y + m.h / 2], [m.x + m.w, m.y + m.h],
+    [m.x + m.w / 2, m.y + m.h], [m.x, m.y + m.h], [m.x, m.y + m.h / 2],
+  ];
+  pts.forEach(([hx, hy]) => {
+    boxCtx.fillStyle = '#fff';
+    boxCtx.fillRect(hx - H / 2, hy - H / 2, H, H);
+    boxCtx.strokeStyle = '#007aff';
+    boxCtx.lineWidth = 1.5 / (STATE.scale || 1);
+    boxCtx.strokeRect(hx - H / 2, hy - H / 2, H, H);
+  });
+  boxCtx.restore();
+}
+
+function handleSizeImg() {
+  // 句柄在显示坐标下大约 12px，换算到图像坐标
+  return 12 / (STATE.scale || 1);
+}
+
+// 命中检测：返回 'body' / 句柄名 / null
+function hitCropHandle(x, y) {
+  const r = STATE.cropRect;
+  if (!r) return null;
+  const H = handleSizeImg();
+  const half = H / 2;
+  const handles = {
+    nw: [r.x, r.y],
+    n:  [r.x + r.w / 2, r.y],
+    ne: [r.x + r.w, r.y],
+    e:  [r.x + r.w, r.y + r.h / 2],
+    se: [r.x + r.w, r.y + r.h],
+    s:  [r.x + r.w / 2, r.y + r.h],
+    sw: [r.x, r.y + r.h],
+    w:  [r.x, r.y + r.h / 2],
+  };
+  for (const name in handles) {
+    const [hx, hy] = handles[name];
+    if (Math.abs(x - hx) <= half && Math.abs(y - hy) <= half) return name;
+  }
+  if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return 'body';
+  return null;
+}
+
+function cursorForCrop(hit) {
+  switch (hit) {
+    case 'nw': case 'se': return 'nwse-resize';
+    case 'ne': case 'sw': return 'nesw-resize';
+    case 'n': case 's':   return 'ns-resize';
+    case 'e': case 'w':   return 'ew-resize';
+    case 'body':          return 'move';
+    default:              return 'crosshair';
+  }
+}
+
+// 把当前 STATE.cropRect 重新画到 boxCtx：遮罩 + 边框 + 8 个白色句柄
+function redrawCropOverlay() {
+  boxCtx.clearRect(0, 0, STATE.imgW, STATE.imgH);
+  const r = STATE.cropRect;
+  if (!r) return;
+  const rad = Math.min(STATE.cropRadius || 0, r.w / 2, r.h / 2);
+  // 暗化区外：用"整屏 fill + 圆角 clip 差集"实现（圆角外也暗化）
+  boxCtx.save();
+  boxCtx.fillStyle = 'rgba(0,0,0,0.45)';
+  boxCtx.beginPath();
+  boxCtx.rect(0, 0, STATE.imgW, STATE.imgH);
+  if (rad > 0) {
+    if (typeof boxCtx.roundRect === 'function') {
+      boxCtx.roundRect(r.x, r.y, r.w, r.h, rad);
+    } else {
+      roundRectPath(boxCtx, r.x, r.y, r.w, r.h, rad);
+    }
+  } else {
+    boxCtx.rect(r.x, r.y, r.w, r.h);
+  }
+  boxCtx.fill('evenodd');
+  boxCtx.restore();
+  // 圆角边框
+  boxCtx.strokeStyle = '#ff9500';
+  boxCtx.lineWidth = 2 / (STATE.scale || 1);
+  boxCtx.setLineDash([6 / (STATE.scale || 1), 4 / (STATE.scale || 1)]);
+  boxCtx.beginPath();
+  if (rad > 0) {
+    if (typeof boxCtx.roundRect === 'function') {
+      boxCtx.roundRect(r.x, r.y, r.w, r.h, rad);
+    } else {
+      roundRectPath(boxCtx, r.x, r.y, r.w, r.h, rad);
+    }
+  } else {
+    boxCtx.rect(r.x, r.y, r.w, r.h);
+  }
+  boxCtx.stroke();
+  boxCtx.setLineDash([]);
+  // 句柄
+  const H = handleSizeImg();
+  const pts = [
+    [r.x, r.y], [r.x + r.w / 2, r.y], [r.x + r.w, r.y],
+    [r.x + r.w, r.y + r.h / 2], [r.x + r.w, r.y + r.h],
+    [r.x + r.w / 2, r.y + r.h], [r.x, r.y + r.h], [r.x, r.y + r.h / 2],
+  ];
+  boxCtx.lineWidth = 1.5 / (STATE.scale || 1);
+  pts.forEach(([hx, hy]) => {
+    boxCtx.fillStyle = '#fff';
+    boxCtx.fillRect(hx - H / 2, hy - H / 2, H, H);
+    boxCtx.strokeStyle = '#ff9500';
+    boxCtx.strokeRect(hx - H / 2, hy - H / 2, H, H);
+  });
+}
+
+boxCanvas.addEventListener('mousedown', e => {
+  if (!STATE.image) return;
+  if (STATE.tool !== 'select' && STATE.tool !== 'crop') return;
+  const p = getCanvasPos(e);
+  startX = p.x; startY = p.y;
+
+  if (STATE.tool === 'crop' && STATE.cropRect) {
+    const hit = hitCropHandle(p.x, p.y);
+    if (hit === 'body') {
+      cropDragMode = 'move';
+      cropInitRect = { ...STATE.cropRect };
+      dragging = true;
+      return;
+    } else if (hit) {
+      cropDragMode = 'resize';
+      cropResizeHandle = hit;
+      cropInitRect = { ...STATE.cropRect };
+      dragging = true;
+      return;
+    }
+    // 点框外 → 重新画
+  }
+
+  // select 工具下：先检查是否点击了画布上的字幕（字幕绘制在最上层，应优先命中）
+  if (STATE.tool === 'select') {
+    const subHit = hitAnySubtitle(p.x, p.y);
+    if (subHit) {
+      subInitOffsetX = STATE.subtitleOffsetX || 0;
+      subInitOffsetY = STATE.subtitleOffsetY || 0;
+      subInitFontSize = STATE.subtitleFontSize;
+      subInitRect = { ...subHit.rect };
+      subPushedHistory = false;
+      if (subHit.hit === 'body') {
+        subDragMode = 'move';
+      } else {
+        subDragMode = 'resize';
+        subResizeHandle = subHit.hit;
+      }
+      dragging = true;
+      return;
+    }
+
+    // 再检查是否点击了已有划线的句柄/框体
+    const found = hitAnyMark(p.x, p.y);
+    if (found) {
+      markDragId = found.mark.id;
+      markInitRect = { x: found.mark.x, y: found.mark.y, w: found.mark.w, h: found.mark.h };
+      markPushedHistory = false; // 等真正有位移时才 pushHistory，避免空点击留历史
+      if (found.hit === 'body') {
+        markDragMode = 'move';
+      } else {
+        markDragMode = 'resize';
+        markResizeHandle = found.hit;
+      }
+      // 激活该划线（便于即时刷新样式面板 / 列表里选中态）
+      if (STATE.activeMarkId !== found.mark.id) {
+        STATE.activeMarkId = found.mark.id;
+        renderMarksList();
+      }
+      drawAllMarksFinal();
+      dragging = true;
+      return;
+    }
+  }
+
+  cropDragMode = STATE.tool === 'crop' ? 'draw' : null;
+  dragging = true;
+});
+
+boxCanvas.addEventListener('mousemove', e => {
+  const p = getCanvasPos(e);
+  if (!dragging) {
+    // hover 状态：crop 工具下根据位置切换光标；select 工具下先检测字幕、再检测划线句柄
+    if (STATE.tool === 'crop' && STATE.cropRect) {
+      boxCanvas.style.cursor = cursorForCrop(hitCropHandle(p.x, p.y));
+    } else if (STATE.tool === 'select') {
+      const subHit = hitAnySubtitle(p.x, p.y);
+      if (subHit) {
+        boxCanvas.style.cursor = cursorForSubtitle(subHit.hit);
+      } else {
+        const found = hitAnyMark(p.x, p.y);
+        boxCanvas.style.cursor = found ? cursorForMark(found.hit) : 'crosshair';
+      }
+    }
+    return;
+  }
+
+  // 字幕：移动
+  if (STATE.tool === 'select' && subDragMode === 'move') {
+    if (!subPushedHistory) { pushHistory(); subPushedHistory = true; }
+    STATE.subtitleOffsetX = subInitOffsetX + (p.x - startX);
+    STATE.subtitleOffsetY = subInitOffsetY + (p.y - startY);
+    // 同步回 UI 数字输入框（如果有）
+    const offxEl = document.getElementById('subOffsetX');
+    const offyEl = document.getElementById('subOffsetY');
+    if (offxEl) offxEl.value = Math.round(STATE.subtitleOffsetX);
+    if (offyEl) offyEl.value = Math.round(STATE.subtitleOffsetY);
+    drawAllMarksFinal();
+    return;
+  }
+
+  // 字幕：角落缩放（按对角距离等比缩放 fontSize，并适当调整 offset 以保持对角锚点稳定）
+  if (STATE.tool === 'select' && subDragMode === 'resize') {
+    if (!subPushedHistory) { pushHistory(); subPushedHistory = true; }
+    const r = subInitRect;
+    // 选定对角锚点：对 se -> nw 角，对 nw -> se 角，依次类推
+    let anchorX, anchorY, movingX, movingY;
+    switch (subResizeHandle) {
+      case 'se': anchorX = r.x;         anchorY = r.y;         movingX = r.x + r.w; movingY = r.y + r.h; break;
+      case 'ne': anchorX = r.x;         anchorY = r.y + r.h;   movingX = r.x + r.w; movingY = r.y;       break;
+      case 'sw': anchorX = r.x + r.w;   anchorY = r.y;         movingX = r.x;       movingY = r.y + r.h; break;
+      case 'nw': anchorX = r.x + r.w;   anchorY = r.y + r.h;   movingX = r.x;       movingY = r.y;       break;
+    }
+    const origDiag = Math.hypot(movingX - anchorX, movingY - anchorY) || 1;
+    const newMovingX = movingX + (p.x - startX);
+    const newMovingY = movingY + (p.y - startY);
+    const newDiag = Math.hypot(newMovingX - anchorX, newMovingY - anchorY);
+    let scale = newDiag / origDiag;
+    scale = Math.max(0.25, Math.min(4, scale));
+    const newFontSize = Math.max(8, Math.min(200, Math.round(subInitFontSize * scale)));
+    STATE.subtitleFontSize = newFontSize;
+    // 同步右侧 UI
+    const fsEl = document.getElementById('subFontSize');
+    const fsValEl = document.getElementById('subFontSizeVal');
+    if (fsEl) fsEl.value = newFontSize;
+    if (fsValEl) fsValEl.textContent = newFontSize;
+    drawAllMarksFinal();
+    return;
+  }
+
+  // 划线：移动
+  if (STATE.tool === 'select' && markDragMode === 'move') {
+    const m = STATE.marks.find(x => x.id === markDragId);
+    if (!m) return;
+    if (!markPushedHistory) { pushHistory(); markPushedHistory = true; }
+    let nx = markInitRect.x + (p.x - startX);
+    let ny = markInitRect.y + (p.y - startY);
+    // 允许划线超出图像（用户可能故意越边），但至少保留 8px 在图内
+    nx = Math.max(8 - markInitRect.w, Math.min(STATE.imgW - 8, nx));
+    ny = Math.max(8 - markInitRect.h, Math.min(STATE.imgH - 8, ny));
+    m.x = nx; m.y = ny;
+    drawAllMarksFinal();
+    drawActiveMarkHandles();
+    return;
+  }
+
+  // 划线：缩放
+  if (STATE.tool === 'select' && markDragMode === 'resize') {
+    const m = STATE.marks.find(x => x.id === markDragId);
+    if (!m) return;
+    if (!markPushedHistory) { pushHistory(); markPushedHistory = true; }
+    const dx = p.x - startX, dy = p.y - startY;
+    let { x, y, w, h } = markInitRect;
+    switch (markResizeHandle) {
+      case 'n':  y = markInitRect.y + dy; h = markInitRect.h - dy; break;
+      case 's':  h = markInitRect.h + dy; break;
+      case 'e':  w = markInitRect.w + dx; break;
+      case 'w':  x = markInitRect.x + dx; w = markInitRect.w - dx; break;
+      case 'nw': x = markInitRect.x + dx; y = markInitRect.y + dy; w = markInitRect.w - dx; h = markInitRect.h - dy; break;
+      case 'ne': y = markInitRect.y + dy; w = markInitRect.w + dx; h = markInitRect.h - dy; break;
+      case 'se': w = markInitRect.w + dx; h = markInitRect.h + dy; break;
+      case 'sw': x = markInitRect.x + dx; w = markInitRect.w - dx; h = markInitRect.h + dy; break;
+    }
+    if (w < 0) { x = x + w; w = -w; }
+    if (h < 0) { y = y + h; h = -h; }
+    const MIN = 10;
+    w = Math.max(MIN, w);
+    h = Math.max(MIN, h);
+    m.x = x; m.y = y; m.w = w; m.h = h;
+    drawAllMarksFinal();
+    drawActiveMarkHandles();
+    return;
+  }
+
+  // 移动
+  if (STATE.tool === 'crop' && cropDragMode === 'move') {
+    let nx = cropInitRect.x + (p.x - startX);
+    let ny = cropInitRect.y + (p.y - startY);
+    nx = Math.max(0, Math.min(STATE.imgW - cropInitRect.w, nx));
+    ny = Math.max(0, Math.min(STATE.imgH - cropInitRect.h, ny));
+    STATE.cropRect = { x: nx, y: ny, w: cropInitRect.w, h: cropInitRect.h };
+    redrawCropOverlay();
+    return;
+  }
+
+  // 缩放
+  if (STATE.tool === 'crop' && cropDragMode === 'resize') {
+    const dx = p.x - startX, dy = p.y - startY;
+    let { x, y, w, h } = cropInitRect;
+    switch (cropResizeHandle) {
+      case 'n':  y = cropInitRect.y + dy; h = cropInitRect.h - dy; break;
+      case 's':  h = cropInitRect.h + dy; break;
+      case 'e':  w = cropInitRect.w + dx; break;
+      case 'w':  x = cropInitRect.x + dx; w = cropInitRect.w - dx; break;
+      case 'nw': x = cropInitRect.x + dx; y = cropInitRect.y + dy; w = cropInitRect.w - dx; h = cropInitRect.h - dy; break;
+      case 'ne': y = cropInitRect.y + dy; w = cropInitRect.w + dx; h = cropInitRect.h - dy; break;
+      case 'se': w = cropInitRect.w + dx; h = cropInitRect.h + dy; break;
+      case 'sw': x = cropInitRect.x + dx; w = cropInitRect.w - dx; h = cropInitRect.h + dy; break;
+    }
+    // 反向拖（穿过对边） → 翻转
+    if (w < 0) { x = x + w; w = -w; }
+    if (h < 0) { y = y + h; h = -h; }
+    // 限制在图像内 + 最小尺寸
+    const MIN = 10;
+    x = Math.max(0, x);
+    y = Math.max(0, y);
+    w = Math.max(MIN, Math.min(STATE.imgW - x, w));
+    h = Math.max(MIN, Math.min(STATE.imgH - y, h));
+    STATE.cropRect = { x, y, w, h };
+    redrawCropOverlay();
+    return;
+  }
+
+  // 画新框（select 或 crop 初次画）
+  boxCtx.clearRect(0, 0, STATE.imgW, STATE.imgH);
+  const isCrop = STATE.tool === 'crop';
+  boxCtx.strokeStyle = isCrop ? '#ff9500' : '#007aff';
+  boxCtx.lineWidth = 2 / (STATE.scale || 1);
+  boxCtx.setLineDash([6 / (STATE.scale || 1), 4 / (STATE.scale || 1)]);
+  boxCtx.strokeRect(startX, startY, p.x - startX, p.y - startY);
+  boxCtx.setLineDash([]);
+  if (isCrop) {
+    const x = Math.min(startX, p.x), y = Math.min(startY, p.y);
+    const w = Math.abs(p.x - startX), h = Math.abs(p.y - startY);
+    boxCtx.fillStyle = 'rgba(0,0,0,0.45)';
+    boxCtx.fillRect(0, 0, STATE.imgW, y);
+    boxCtx.fillRect(0, y + h, STATE.imgW, STATE.imgH - (y + h));
+    boxCtx.fillRect(0, y, x, h);
+    boxCtx.fillRect(x + w, y, STATE.imgW - (x + w), h);
+  }
+});
+
+boxCanvas.addEventListener('mouseup', e => {
+  if (!dragging) return;
+  dragging = false;
+  const p = getCanvasPos(e);
+
+  // 完成字幕移动/缩放
+  if (STATE.tool === 'select' && (subDragMode === 'move' || subDragMode === 'resize')) {
+    drawAllMarksFinal();
+    subDragMode = null;
+    subResizeHandle = null;
+    subInitRect = null;
+    subPushedHistory = false;
+    return;
+  }
+
+  // 完成划线移动/缩放
+  if (STATE.tool === 'select' && (markDragMode === 'move' || markDragMode === 'resize')) {
+    drawAllMarksFinal();
+    drawActiveMarkHandles();
+    // 划线被编辑（位置变化可能影响字幕对位） → 整段译文可能过时
+    if (markPushedHistory && typeof invalidateWholeTranslation === 'function') {
+      invalidateWholeTranslation();
+    }
+    markDragMode = null;
+    markResizeHandle = null;
+    markInitRect = null;
+    markDragId = null;
+    markPushedHistory = false;
+    return;
+  }
+
+  // 完成移动/缩放：cropRect 已经在 mousemove 里更新过，重画一遍带句柄的状态
+  if (STATE.tool === 'crop' && (cropDragMode === 'move' || cropDragMode === 'resize')) {
+    redrawCropOverlay();
+    cropDragMode = null;
+    cropResizeHandle = null;
+    return;
+  }
+
+  const x = Math.min(startX, p.x), y = Math.min(startY, p.y);
+  const w = Math.abs(p.x - startX), h = Math.abs(p.y - startY);
+  if (w < 8 || h < 8) {
+    boxCtx.clearRect(0, 0, STATE.imgW, STATE.imgH);
+    if (STATE.cropRect) redrawCropOverlay(); // 之前的框还在就保留
+    else if (STATE.tool === 'select') drawActiveMarkHandles();
+    cropDragMode = null;
+    return;
+  }
+  if (STATE.tool === 'select') {
+    boxCtx.clearRect(0, 0, STATE.imgW, STATE.imgH);
+    addMark({ x, y, w, h });
+    drawActiveMarkHandles();
+  } else if (STATE.tool === 'crop') {
+    STATE.cropRect = { x, y, w, h };
+    redrawCropOverlay(); // 立即显示句柄，之后可拖动/缩放
+  }
+  cropDragMode = null;
+});
+
+/* ===== 应用裁切 ===== */
+function applyCrop() {
+  if (!STATE.cropRect || !STATE.image) return;
+  pushHistory(); // 裁切是大动作：图片 + 全部 mark 坐标都会变
+  const { x, y, w, h } = STATE.cropRect;
+  const rad = Math.min(STATE.cropRadius || 0, w / 2, h / 2);
+  // 用 offscreen canvas 裁出新图；如果设置了圆角，则用圆角路径 clip 后再绘制
+  const off = document.createElement('canvas');
+  off.width = w; off.height = h;
+  const offCtx = off.getContext('2d');
+  if (rad > 0) {
+    offCtx.save();
+    offCtx.beginPath();
+    if (typeof offCtx.roundRect === 'function') {
+      offCtx.roundRect(0, 0, w, h, rad);
+    } else {
+      roundRectPath(offCtx, 0, 0, w, h, rad);
+    }
+    offCtx.clip();
+    offCtx.drawImage(STATE.image, x, y, w, h, 0, 0, w, h);
+    offCtx.restore();
+  } else {
+    offCtx.drawImage(STATE.image, x, y, w, h, 0, 0, w, h);
+  }
+  // 把裁完的图转成 Image
+  const dataUrl = off.toDataURL('image/png');
+  const img = new Image();
+  img.onload = () => {
+    // 调整所有已有 mark 的坐标
+    STATE.marks = STATE.marks
+      .map(m => ({ ...m, x: m.x - x, y: m.y - y }))
+      .filter(m => m.x + m.w > 0 && m.y + m.h > 0 && m.x < w && m.y < h);
+    setupImage(img);  // 重置 image
+    // 裁切完成后重置圆角滑杆，避免下一次误沿用
+    STATE.cropRadius = 0;
+    if ($('cropRadiusRange')) {
+      $('cropRadiusRange').value = 0;
+      $('cropRadiusVal').textContent = '0px';
+    }
+    // 切回框选模式
+    document.querySelector('.tool-btn[data-tool="select"]').click();
+  };
+  img.src = dataUrl;
+}
+
+/* ===== 添加划线 ===== */
+function addMark({ x, y, w, h, text = '' }, opts = {}) {
+  if (!opts.skipHistory) pushHistory();
+  const mark = {
+    id: 'm' + Date.now() + Math.random().toString(36).slice(2, 6),
+    x, y, w, h,
+    color: STATE.currentColor,
+    opacity: STATE.currentOpacity,
+    thickness: STATE.currentThickness,
+    radius: STATE.currentRadius,
+    style: STATE.currentStyle,
+    duration: STATE.currentDuration || 1.0,
+    delay: STATE.marks.length ? (STATE.marks[STATE.marks.length - 1].delay + STATE.marks[STATE.marks.length - 1].duration) : 0,
+    text,
+    translation: '',
+  };
+  STATE.marks.push(mark);
+  STATE.activeMarkId = mark.id;
+  // 新划线加入后，整段译文需要重译才能保持连贯
+  if (typeof invalidateWholeTranslation === 'function') invalidateWholeTranslation();
+  renderMarksList();
+  drawAllMarksFinal();
+}
+
+/* ===== 划线列表 ===== */
+function renderMarksList() {
+  const list = $('marksList');
+  if (!STATE.marks.length) {
+    list.innerHTML = '<div style="font-size:12px; color:#86868b;">尚未添加，先在画布上框选区域</div>';
+    return;
+  }
+  list.innerHTML = '';
+  STATE.marks.forEach((m, i) => {
+    const item = document.createElement('div');
+    item.className = 'mark-item' + (m.id === STATE.activeMarkId ? ' active' : '');
+    item.innerHTML = `
+      <div class="mark-item-header">
+        <div class="mark-color-dot" style="background:${m.color}"></div>
+        <div class="mark-index">第 ${i + 1} 条 · ${styleLabel(m.style)}</div>
+        <button class="mark-delete" data-id="${m.id}">×</button>
+      </div>
+      <div class="mark-row">
+        <span>时长</span>
+        <input type="number" min="0.1" max="10" step="0.1" value="${m.duration}" data-id="${m.id}" data-field="duration">
+        <span>秒，延迟</span>
+        <input type="number" min="0" max="20" step="0.1" value="${m.delay}" data-id="${m.id}" data-field="delay">
+        <span>秒</span>
+      </div>
+      <div class="mark-row" style="align-items:flex-start;margin-top:4px">
+        <span style="padding-top:6px">原文</span>
+        <textarea data-id="${m.id}" data-field="text" placeholder="框选后默认为空，可用右边"识别原文"或手动输入" style="flex:1;min-height:36px;padding:4px 6px;font-size:12px;border:1px solid #d2d2d7;border-radius:4px;resize:vertical;font-family:inherit">${(m.text||'').replace(/</g,'&lt;')}</textarea>
+      </div>
+    `;
+    item.addEventListener('click', e => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
+      STATE.activeMarkId = m.id;
+      // 同步当前样式控件
+      STATE.currentColor = m.color;
+      STATE.currentOpacity = m.opacity;
+      STATE.currentThickness = m.thickness;
+      STATE.currentRadius = (m.radius !== undefined ? m.radius : 6);
+      STATE.currentStyle = m.style;
+      STATE.currentDuration = m.duration || 1.0;
+      $('opacityRange').value = m.opacity;
+      $('opacityVal').textContent = m.opacity + '%';
+      $('thicknessRange').value = m.thickness;
+      $('thicknessVal').textContent = m.thickness + 'px';
+      $('radiusRange').value = STATE.currentRadius;
+      $('radiusVal').textContent = STATE.currentRadius + 'px';
+      $('durationRange').value = Math.round(STATE.currentDuration * 10);
+      $('durationVal').textContent = STATE.currentDuration.toFixed(1) + 's';
+      $('customColor').value = m.color;
+      document.querySelectorAll('.style-tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.style === m.style);
+      });
+      renderColors();
+      renderMarksList();
+    });
+    list.appendChild(item);
+  });
+  list.querySelectorAll('.mark-delete').forEach(btn => {
+    btn.onclick = e => {
+      e.stopPropagation();
+      pushHistory();
+      STATE.marks = STATE.marks.filter(x => x.id !== btn.dataset.id);
+      if (STATE.activeMarkId === btn.dataset.id) STATE.activeMarkId = null;
+      if (typeof invalidateWholeTranslation === 'function') invalidateWholeTranslation();
+      renderMarksList(); drawAllMarksFinal();
+    };
+  });
+  list.querySelectorAll('input[data-field]').forEach(inp => {
+    inp.onchange = () => {
+      const m = STATE.marks.find(x => x.id === inp.dataset.id);
+      if (!m) return;
+      pushHistory();
+      m[inp.dataset.field] = parseFloat(inp.value) || 0;
+    };
+  });
+  // 原文 / 译文 文本框 —— 可以手动编辑；一次 focus 到 blur 当做一次撤回单元
+  list.querySelectorAll('textarea[data-field]').forEach(ta => {
+    let snapshotted = false;
+    ta.onfocus = () => { snapshotted = false; };
+    ta.oninput = () => {
+      const m = STATE.marks.find(x => x.id === ta.dataset.id);
+      if (!m) return;
+      if (!snapshotted) { pushHistory(); snapshotted = true; }
+      m[ta.dataset.field] = ta.value;
+      // 原文被编辑后，整段译文需要重译才能保持连贯
+      if (ta.dataset.field === 'text' && typeof invalidateWholeTranslation === 'function') {
+        invalidateWholeTranslation();
+      }
+      drawAllMarksFinal();
+    };
+    ta.onclick = e => e.stopPropagation();
+  });
+}
+
+/* ===== 划线渲染（终态，progress=1） ===== */
+function styleLabel(s) {
+  if (s === 'highlight') return '荧光笔';
+  if (s === 'block') return '色块';
+  if (s === 'hand') return '手绘';
+  if (s === 'negative-dark') return '负片·黑底白字';
+  if (s === 'negative-light') return '负片·白底黑字';
+  return s;
+}
+
+function isNegativeStyle(s) {
+  return s === 'negative-dark' || s === 'negative-light';
+}
+
+function drawMarkOnContext(ctx, mark, progress = 1) {
+  ctx.save();
+  ctx.globalAlpha = mark.opacity / 100;
+  // 划线辉光（外侧光晕）：在画线本体之前先用 shadowBlur 描一层光，
+  // 仅作用于荧光笔 / 色块这种"实心几何"风格；负片本身就是反色填充，加 shadow 反而显脏。
+  const glowOn = STATE.markGlowEnabled
+    && (STATE.markGlowBlur || 0) > 0
+    && !isNegativeStyle(mark.style);
+  if (glowOn) {
+    const glowColor = STATE.markGlowMode === 'custom' ? (STATE.markGlowColor || mark.color) : mark.color;
+    const glowAlpha = (STATE.markGlowOpacity == null ? 80 : STATE.markGlowOpacity) / 100;
+    // 先画一遍带 shadow 的几何，再画一遍正常几何，保证"光晕在外、本体在内"
+    ctx.save();
+    ctx.shadowColor = withAlpha(glowColor, glowAlpha);
+    ctx.shadowBlur = STATE.markGlowBlur;
+    if (mark.style === 'highlight')      drawHighlight(ctx, mark, progress);
+    else if (mark.style === 'block')     drawBlock(ctx, mark, progress);
+    else if (mark.style === 'hand')      drawHand(ctx, mark, progress);
+    ctx.restore();
+  }
+  if (mark.style === 'highlight') {
+    drawHighlight(ctx, mark, progress);
+  } else if (mark.style === 'block') {
+    drawBlock(ctx, mark, progress);
+  } else if (mark.style === 'hand') {
+    drawHand(ctx, mark, progress);   // 兼容已有"手绘"旧标注
+  } else if (isNegativeStyle(mark.style)) {
+    drawNegative(ctx, mark, progress, mark.style === 'negative-dark' ? 'dark' : 'light');
+  }
+  ctx.restore();
+}
+
+// 把 #rrggbb / #rgb 转成 rgba(...) 字符串，用于 shadowColor 等带透明度的场景
+function withAlpha(color, alpha) {
+  if (!color) return `rgba(0,0,0,${alpha})`;
+  let c = color.trim();
+  if (c.startsWith('#')) {
+    let h = c.slice(1);
+    if (h.length === 3) h = h.split('').map(x => x + x).join('');
+    const r = parseInt(h.slice(0, 2), 16) || 0;
+    const g = parseInt(h.slice(2, 4), 16) || 0;
+    const b = parseInt(h.slice(4, 6), 16) || 0;
+    return `rgba(${r},${g},${b},${alpha})`;
+  }
+  // 已经是 rgb(...) 形式
+  if (c.startsWith('rgb')) {
+    return c.replace(/rgba?\(([^)]+)\)/, (m, inner) => {
+      const parts = inner.split(',').map(s => s.trim());
+      return `rgba(${parts[0]},${parts[1]},${parts[2]},${alpha})`;
+    });
+  }
+  return color;
+}
+
+/* 把"色块"的几何路径建到 ctx 上（不 fill）。返回是否成功建路径。 */
+function buildBlockPath(ctx, m, progress) {
+  const drawW = Math.max(0, m.w * progress);
+  if (drawW <= 0) return false;
+  const h = Math.min(m.thickness, m.h);
+  const y = m.y + m.h / 2 - h / 2;
+  const r = Math.min(m.radius !== undefined ? m.radius : 6, h / 2, drawW / 2);
+  ctx.beginPath();
+  if (typeof ctx.roundRect === 'function') {
+    ctx.roundRect(m.x, y, drawW, h, r);
+  } else {
+    ctx.moveTo(m.x + r, y);
+    ctx.lineTo(m.x + drawW - r, y);
+    ctx.quadraticCurveTo(m.x + drawW, y, m.x + drawW, y + r);
+    ctx.lineTo(m.x + drawW, y + h - r);
+    ctx.quadraticCurveTo(m.x + drawW, y + h, m.x + drawW - r, y + h);
+    ctx.lineTo(m.x + r, y + h);
+    ctx.quadraticCurveTo(m.x, y + h, m.x, y + h - r);
+    ctx.lineTo(m.x, y + r);
+    ctx.quadraticCurveTo(m.x, y, m.x + r, y);
+    ctx.closePath();
+  }
+  return true;
+}
+
+/* 色块：横平竖直圆角矩形，厚度决定色块高度（以 mark 垂直中线对齐），从左向右扫过 */
+function drawBlock(ctx, m, progress) {
+  if (!buildBlockPath(ctx, m, progress)) return;
+  ctx.fillStyle = m.color;
+  ctx.fill();
+}
+
+/* 反相模式下"打补丁"用：把这条 mark 视觉覆盖区域的原图（非反相）画进去，
+ * 之后再 multiply 划线色 → 视觉是"黄底黑字"而不是"黄底白字"。
+ * 仅用于 highlight / block；hand 是细笔触不太需要反向；negative 自带反色逻辑。 */
+function punchOriginalUnderMark(ctx, m, progress) {
+  if (!STATE.image) return;
+  let hasPath = false;
+  if (m.style === 'highlight') {
+    buildHighlightPath(ctx, m, progress);
+    hasPath = true;
+  } else if (m.style === 'block') {
+    hasPath = buildBlockPath(ctx, m, progress);
+  }
+  if (!hasPath) return;
+  ctx.save();
+  ctx.clip();
+  // STATE.image 是原图（不是反相版本），整图绘制后只有 clip 范围内可见 → 把反相像素覆盖回原图
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(STATE.image, 0, 0);
+  ctx.restore();
+}
+
+/* 负片（反色）效果：把选框区域换成 B&W 负片
+ * dark  → 黑底白字（典型论文黑字白底 → 反成白字黑底）
+ * light → 白底黑字（只把色彩抽成灰度，保持"干净的白底+黑字"）
+ * 用 ctx.filter 的 invert(1)/grayscale(1) 实现，任何 2D canvas 都支持
+ */
+function drawNegative(ctx, m, progress, variant) {
+  if (!STATE.image) return;
+  const drawW = m.w * progress;
+  if (drawW <= 0) return;
+  const radius = Math.min(
+    m.radius !== undefined ? m.radius : 0,
+    m.h / 2,
+    m.w / 2
+  );
+  ctx.save();
+  // 整个选框按圆角裁剪（用整块 m.w，保证右边界的圆角稳定），
+  // 再叠一层"按 progress 从左到右扫过"的矩形裁剪
+  ctx.beginPath();
+  if (typeof ctx.roundRect === 'function') {
+    ctx.roundRect(m.x, m.y, m.w, m.h, radius);
+  } else {
+    roundRectPath(ctx, m.x, m.y, m.w, m.h, radius);
+  }
+  ctx.clip();
+  ctx.beginPath();
+  ctx.rect(m.x, m.y, drawW, m.h);
+  ctx.clip();
+  // 先铺一层底色，保证"掏空"透明区域也是纯色背景
+  ctx.fillStyle = variant === 'dark' ? '#000' : '#fff';
+  ctx.fillRect(m.x, m.y, drawW, m.h);
+  // 把源图像对应区域以 filter 方式贴进来
+  ctx.filter = variant === 'dark' ? 'invert(1) grayscale(1) contrast(1.15)' : 'grayscale(1) contrast(1.1)';
+  ctx.drawImage(getDocSource(), m.x, m.y, m.w, m.h, m.x, m.y, m.w, m.h);
+  ctx.filter = 'none';
+  ctx.restore();
+}
+/* 手画圆角矩形路径（Safari 早期版本无 roundRect 时的兜底） */
+function roundRectPath(ctx, x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+/* 把"荧光笔"的几何路径建到 ctx 上（不 fill，调用方决定 fill 还是 clip）。
+ * 抽出来是为了反相模式下用同一条路径"打补丁原图" + "multiply 高亮色"，
+ * 两次绘制几何要严格对齐。 */
+function buildHighlightPath(ctx, m, progress) {
+  const drawW = m.w * progress;
+  const seed = parseInt(m.id.replace(/\D/g, '').slice(0, 6) || '1', 10) || 1;
+  const rng = mulberry32(seed);
+  ctx.beginPath();
+  const segments = Math.max(20, Math.floor(drawW / 6));
+  for (let i = 0; i <= segments; i++) {
+    const t = i / segments;
+    const x = m.x + drawW * t;
+    const noise = (rng() - 0.5) * m.thickness * 0.08;
+    const y = m.y + m.h / 2 - m.thickness / 2 + noise;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.lineTo(m.x + drawW, m.y + m.h / 2 + m.thickness / 2);
+  for (let i = segments; i >= 0; i--) {
+    const t = i / segments;
+    const x = m.x + drawW * t;
+    const noise = (rng() - 0.5) * m.thickness * 0.08;
+    const y = m.y + m.h / 2 + m.thickness / 2 + noise;
+    ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+function drawHighlight(ctx, m, progress) {
+  // 荧光笔：圆头矩形，从左到右扫过
+  ctx.fillStyle = m.color;
+  ctx.shadowColor = m.color;
+  ctx.shadowBlur = m.thickness * 0.4;
+  buildHighlightPath(ctx, m, progress);
+  ctx.fill();
+}
+
+function drawHand(ctx, m, progress) {
+  // 手绘风格：3 道交错线条 + 不规则抖动
+  const seed = parseInt(m.id.replace(/\D/g, '').slice(0, 6) || '1', 10) || 1;
+  const rng = mulberry32(seed);
+  ctx.strokeStyle = m.color;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  const passes = 3;
+  const baseY = m.y + m.h / 2;
+  for (let p = 0; p < passes; p++) {
+    ctx.lineWidth = m.thickness * (0.4 + rng() * 0.3);
+    ctx.beginPath();
+    const segments = Math.max(20, Math.floor(m.w / 5));
+    const totalLen = m.w * progress;
+    for (let i = 0; i <= segments; i++) {
+      const t = i / segments;
+      if (m.x + m.w * t > m.x + totalLen) break;
+      const x = m.x + m.w * t + (rng() - 0.5) * m.thickness * 0.15;
+      const yOffset = (rng() - 0.5) * m.thickness * 0.7 + (p - 1) * m.thickness * 0.2;
+      const y = baseY + yOffset;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+}
+
+function drawAllMarksFinal() {
+  // drawCanvas 带 CSS mix-blend-mode: multiply，只放荧光笔/手绘（颜色压在文字下面）
+  drawCtx.clearRect(0, 0, STATE.imgW, STATE.imgH);
+  STATE.marks.forEach(m => {
+    if (!isNegativeStyle(m.style)) drawMarkOnContext(drawCtx, m, 1);
+  });
+  // 清空上一帧字幕命中区；本帧内绘制字幕时会重新写入
+  STATE._lastSubtitleRects = [];
+  // imgCanvas（无混合）上画：原图 → 反相补丁 / 内嵌译文 → 负片替换 → 字幕
+  if (STATE.image) {
+    imgCtx.clearRect(0, 0, STATE.imgW, STATE.imgH);
+    imgCtx.drawImage(getDocSource(), 0, 0);
+    // 反相模式下：划线覆盖区域"打补丁"为原图（黑字白底），让 multiply 高亮色得到"黄底黑字（原文）"
+    if (STATE.invertDoc) {
+      STATE.marks.forEach(m => {
+        if (m.style === 'highlight' || m.style === 'block') {
+          punchOriginalUnderMark(imgCtx, m, 1);
+        }
+      });
+    }
+    STATE.marks.forEach(m => {
+      if (isNegativeStyle(m.style)) drawMarkOnContext(imgCtx, m, 1);
+    });
+    if (STATE.subtitleMode === 'combined') {
+      // 编辑器预览用 sec = 一个足够大的时间点，确保字幕"已经完全淡入"
+      drawCombinedSubtitleOnContext(imgCtx, Number.POSITIVE_INFINITY, true);
+    } else {
+      STATE.marks.forEach(m => drawSubtitleOnContext(imgCtx, m, 1, true));
+    }
+  }
+  // 在 select 工具、未拖动时，把激活划线的句柄叠到 boxCtx 上（可手动调位置/大小）
+  if (STATE.tool === 'select' && !dragging) {
+    boxCtx.clearRect(0, 0, STATE.imgW, STATE.imgH);
+    drawActiveMarkHandles();
+  }
+  // 3D 预览（如果开了）随划线/字幕变化实时刷新
+  if (typeof scheduleGLPreview === 'function') scheduleGLPreview();
+}
+
+/* ===== 翻译（免费无密钥）===== */
+async function translateText(text, target = 'zh-CN') {
+  text = (text || '').trim();
+  if (!text) return '';
+  // 已经是中文就直接返回
+  const han = text.match(/[\u4e00-\u9fff]/g);
+  if (han && han.length / text.length > 0.6) return text;
+  // 太长则分段（MyMemory 单次上限 500 字符，Google 保险起见一次 800）
+  const chunks = splitForTranslate(text, 800);
+  const out = [];
+  for (const c of chunks) {
+    let zh;
+    try { zh = await translateViaGoogle(c, target); }
+    catch (e) {
+      console.warn('Google 翻译失败，尝试 MyMemory', e);
+      zh = await translateViaMyMemory(c, target);
+    }
+    out.push(zh);
+  }
+  return out.join('');
+}
+
+function splitForTranslate(text, maxLen) {
+  if (text.length <= maxLen) return [text];
+  const parts = [];
+  let cur = '';
+  // 优先按句号/换行切
+  const segs = text.split(/([.!?。！？\n]+)/);
+  for (let i = 0; i < segs.length; i += 2) {
+    const piece = (segs[i] || '') + (segs[i + 1] || '');
+    if ((cur + piece).length > maxLen && cur) { parts.push(cur); cur = piece; }
+    else cur += piece;
+  }
+  if (cur) parts.push(cur);
+  return parts.length ? parts : [text];
+}
+
+async function translateViaGoogle(text, target) {
+  const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=' +
+    encodeURIComponent(target) + '&dt=t&q=' + encodeURIComponent(text);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('Google HTTP ' + res.status);
+  const data = await res.json();
+  if (!Array.isArray(data) || !Array.isArray(data[0])) throw new Error('Google 返回无效');
+  return data[0].map(seg => (seg && seg[0]) || '').join('').trim();
+}
+
+async function translateViaMyMemory(text, target) {
+  const pair = 'en|' + target;
+  const url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text) + '&langpair=' + pair;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('MyMemory HTTP ' + res.status);
+  const data = await res.json();
+  if (data && data.responseData && data.responseData.translatedText) {
+    return data.responseData.translatedText;
+  }
+  throw new Error('MyMemory 返回无效');
+}
+
+/* ===== 字幕渲染 =====
+ * 在与图像同一坐标系（camera transform 已应用）里画：
+ *   1) 文字（可调颜色/字号/粗体）
+ *   2) 文字下方跟主划线同色同风格的划线
+ * opacity 用于淡入动画（0-1）
+ */
+/* 合并模式下所有划线原文拼成一段的"整段原文"
+ * 按划线在列表中的顺序拼接；英文句子自然用空格衔接，连成一段话再送翻译，
+ * 这样得到的译文才是连贯的，而不是 3 句各翻各的再拼。 */
+function getCombinedSourceText() {
+  if (!STATE.marks.length) return '';
+  return STATE.marks
+    .map(m => (m.text || '').trim())
+    .filter(Boolean)
+    .join(' ');
+}
+
+/* 合并模式字幕文本：
+ *  - 优先使用"整段翻译" STATE.wholeTranslation（来自一次性翻译拼接原文的结果，连贯）
+ *  - 若没有整段翻译（兼容历史数据 / 用户只用了逐条翻译），回退到把每条 m.translation 用换行拼起来 */
+function getCombinedSubtitleText() {
+  if (!STATE.marks.length) return '';
+  const whole = (STATE.wholeTranslation || '').trim();
+  if (whole) return whole;
+  return STATE.marks
+    .map(m => (m.translation || '').trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
+/* 合并模式下字幕块的坐标起点（图像坐标系）：
+ *  - X: 所有划线里最左的 x
+ *  - Y: 所有划线里最底（y + h）再加上 combinedGap
+ *  - 宽: 所有划线从最左到最右覆盖的范围（作为文本块的最大宽度基准） */
+function getCombinedSubtitleAnchor() {
+  if (!STATE.marks.length) return null;
+  let minX = Infinity, maxX = -Infinity, maxBottom = -Infinity;
+  STATE.marks.forEach(m => {
+    if (m.x < minX) minX = m.x;
+    if (m.x + m.w > maxX) maxX = m.x + m.w;
+    if (m.y + m.h > maxBottom) maxBottom = m.y + m.h;
+  });
+  return {
+    x: minX,
+    y: maxBottom + STATE.subtitleCombinedGap,
+    w: Math.max(200, maxX - minX),
+  };
+}
+
+/* 合并模式下整体淡入进度（0-1）：
+ *  取"所有划线 subtitleProgress 的最大值"，这样最后一条划线开始淡入 → 字幕块同步淡入
+ *  预览结尾（全部动画结束后）= 1 */
+function combinedSubtitleOpacityAt(sec) {
+  if (!STATE.subtitleEnabled) return 0;
+  const text = getCombinedSubtitleText();
+  if (!text) return 0;
+  let maxP = 0;
+  STATE.marks.forEach(m => {
+    const p = subtitleProgressAt(m, sec);
+    if (p > maxP) maxP = p;
+  });
+  return maxP;
+}
+
+/* 合并字幕块绘制：
+ *  - 一个大底色块（包 visibleH 高度）
+ *  - 多行文字 */
+function drawCombinedSubtitleOnContext(ctx, sec, recordRect = false) {
+  if (!STATE.subtitleEnabled) return;
+  const text = getCombinedSubtitleText();
+  if (!text) return;
+  const anchor = getCombinedSubtitleAnchor();
+  if (!anchor) return;
+  const opacity = combinedSubtitleOpacityAt(sec);
+  if (opacity <= 0) return;
+
+  const fontSize = STATE.subtitleFontSize;
+  const weight = STATE.subtitleBold ? '700 ' : '400 ';
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.font = `${weight}${fontSize}px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif`;
+  ctx.textBaseline = 'top';
+
+  // 换行：按 anchor.w 作为最大宽度，把每条译文（按原来的 \n 分段）独立换行
+  const maxW = Math.max(240, Math.min(STATE.imgW * 0.95, anchor.w));
+  const paragraphs = text.split('\n');
+  const lines = [];
+  paragraphs.forEach(p => {
+    const wrapped = wrapSubtitleText(ctx, p, maxW);
+    wrapped.forEach(ln => lines.push(ln));
+  });
+  const lineH = fontSize * 1.4;
+  const visibleH = fontSize + (lines.length - 1) * lineH;
+  const widestLine = Math.max(...lines.map(ln => ctx.measureText(ln).width));
+
+  const slide = (1 - opacity) * 10;
+  // 应用用户位置微调
+  const offX = STATE.subtitleOffsetX || 0;
+  const offY = STATE.subtitleOffsetY || 0;
+  const textX = anchor.x + offX;
+  const glyphTop = anchor.y + slide + offY;
+
+  const padX = STATE.subtitlePadX;
+  const padY = STATE.subtitlePadY;
+  const boxX = textX - padX;
+  const boxY = glyphTop - padY;
+  const boxW = widestLine + padX * 2;
+  const boxH = visibleH + padY * 2;
+  const radius = Math.min(STATE.subtitleRadius, boxH / 2);
+
+  ctx.globalAlpha = (STATE.subtitleBgOpacity / 100) * opacity;
+  ctx.fillStyle = STATE.subtitleBgColor;
+  roundedRect(ctx, boxX, boxY, boxW, boxH, radius);
+  ctx.fill();
+
+  // 记录字幕 rect，供"画布上拖动/缩放字幕"用（仅在编辑器预览时）
+  if (recordRect) {
+    STATE._lastSubtitleRects.push({
+      kind: 'combined',
+      x: boxX, y: boxY, w: boxW, h: boxH,
+      fontSize: fontSize
+    });
+  }
+
+  ctx.globalAlpha = opacity;
+  // 文字阴影（只作用于文字，不作用于底色块）
+  const sBlur = STATE.subtitleShadowBlur || 0;
+  const sOffX = STATE.subtitleShadowOffsetX || 0;
+  const sOffY = STATE.subtitleShadowOffsetY || 0;
+  const enableShadow = sBlur > 0 || sOffX !== 0 || sOffY !== 0;
+  if (enableShadow) {
+    ctx.shadowColor = STATE.subtitleShadowColor || '#000';
+    ctx.shadowBlur = sBlur;
+    ctx.shadowOffsetX = sOffX;
+    ctx.shadowOffsetY = sOffY;
+  }
+  // 文字描边（先描边再填色，保证笔画在字形外侧）
+  const strokeW = STATE.subtitleStrokeWidth || 0;
+  if (strokeW > 0) {
+    ctx.lineJoin = 'round';
+    ctx.miterLimit = 2;
+    ctx.lineWidth = strokeW * 2; // 一半被填色覆盖，感官宽度 = strokeW
+    ctx.strokeStyle = STATE.subtitleStrokeColor || '#000';
+    lines.forEach((ln, i) => {
+      ctx.strokeText(ln, textX, glyphTop + i * lineH);
+    });
+  }
+  ctx.fillStyle = STATE.subtitleFontColor;
+  lines.forEach((ln, i) => {
+    ctx.fillText(ln, textX, glyphTop + i * lineH);
+  });
+  // 清空 shadow 状态，避免影响后续绘制
+  if (enableShadow) {
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
+  }
+
+  ctx.restore();
+}
+
+function drawSubtitleOnContext(ctx, mark, opacity /* _blendUnused */, recordRect = false) {
+  if (!STATE.subtitleEnabled) return;
+  // 合并模式下，单条字幕不再渲染；统一用 drawCombinedSubtitleOnContext
+  if (STATE.subtitleMode === 'combined') return;
+  const text = (mark.translation || '').trim();
+  if (!text) return;
+  if (opacity <= 0) return;
+
+  const fontSize = STATE.subtitleFontSize;
+  const weight = STATE.subtitleBold ? '700 ' : '400 ';
+  ctx.save();
+  // 底色块和文字都要独立于 multiply 模式，保证字幕在任何背景上都清晰可读
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.font = `${weight}${fontSize}px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif`;
+  ctx.textBaseline = 'top';
+
+  // 字幕最大宽度
+  const maxW = Math.min(STATE.imgW * 0.95, Math.max(420, mark.w));
+  const lines = wrapSubtitleText(ctx, text, maxW);
+  const lineH = fontSize * 1.4;
+  // 可见字形高度：第一行顶到最后一行底（单行 = fontSize，多行 = fontSize + (n-1)*lineH）
+  const visibleH = fontSize + (lines.length - 1) * lineH;
+  const widestLine = Math.max(...lines.map(ln => ctx.measureText(ln).width));
+
+  // 起点：mark 底部下方 subtitleGap（加上淡入时的上滑）+ 用户位置微调
+  const slide = (1 - opacity) * 8;
+  const offX = STATE.subtitleOffsetX || 0;
+  const offY = STATE.subtitleOffsetY || 0;
+  const textX = mark.x + offX;
+  const glyphTop = mark.y + mark.h + STATE.subtitleGap + slide + offY;
+
+  // === 1) 先画底色块（solid 色块，圆角，可调透明度） ===
+  const padX = STATE.subtitlePadX;
+  const padY = STATE.subtitlePadY;
+  const boxX = textX - padX;
+  const boxY = glyphTop - padY;
+  const boxW = widestLine + padX * 2;
+  const boxH = visibleH + padY * 2;
+  const radius = Math.min(STATE.subtitleRadius, boxH / 2);
+
+  ctx.globalAlpha = (STATE.subtitleBgOpacity / 100) * opacity;
+  ctx.fillStyle = STATE.subtitleBgColor;
+  roundedRect(ctx, boxX, boxY, boxW, boxH, radius);
+  ctx.fill();
+
+  // 记录字幕 rect，供"画布上拖动/缩放字幕"用（仅在编辑器预览时）
+  if (recordRect) {
+    STATE._lastSubtitleRects.push({
+      kind: 'per-mark',
+      markId: mark.id,
+      x: boxX, y: boxY, w: boxW, h: boxH,
+      fontSize: fontSize
+    });
+  }
+
+  // === 2) 再画文字（source-over 保持色彩饱和度），每行在自己的 lineH 槽内垂直居中 ===
+  ctx.globalAlpha = opacity;
+  // 文字阴影
+  const sBlur = STATE.subtitleShadowBlur || 0;
+  const sOffX = STATE.subtitleShadowOffsetX || 0;
+  const sOffY = STATE.subtitleShadowOffsetY || 0;
+  const enableShadow = sBlur > 0 || sOffX !== 0 || sOffY !== 0;
+  if (enableShadow) {
+    ctx.shadowColor = STATE.subtitleShadowColor || '#000';
+    ctx.shadowBlur = sBlur;
+    ctx.shadowOffsetX = sOffX;
+    ctx.shadowOffsetY = sOffY;
+  }
+  // 描边
+  const strokeW = STATE.subtitleStrokeWidth || 0;
+  if (strokeW > 0) {
+    ctx.lineJoin = 'round';
+    ctx.miterLimit = 2;
+    ctx.lineWidth = strokeW * 2;
+    ctx.strokeStyle = STATE.subtitleStrokeColor || '#000';
+    lines.forEach((ln, i) => {
+      ctx.strokeText(ln, textX, glyphTop + i * lineH);
+    });
+  }
+  ctx.fillStyle = STATE.subtitleFontColor;
+  lines.forEach((ln, i) => {
+    ctx.fillText(ln, textX, glyphTop + i * lineH);
+  });
+  if (enableShadow) {
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
+  }
+
+  ctx.restore();
+}
+
+function roundedRect(ctx, x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, Math.min(w, h) / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function wrapSubtitleText(ctx, text, maxWidth) {
+  const lines = [];
+  const paras = text.split(/\n/);
+  for (const para of paras) {
+    let current = '';
+    const chars = Array.from(para);
+    for (const ch of chars) {
+      const test = current + ch;
+      if (ctx.measureText(test).width <= maxWidth) {
+        current = test;
+      } else {
+        if (current) lines.push(current);
+        current = ch;
+      }
+    }
+    if (current) lines.push(current);
+    else if (!paras.length) lines.push('');
+  }
+  return lines.length ? lines : [''];
+}
+
+function subtitleProgressAt(mark, sec) {
+  if (!(mark.translation || '').trim()) return 0;
+  // 全局划线起始延迟：在这段时间内文献空白停留
+  const s = (typeof sec === 'number' && isFinite(sec)) ? sec - (STATE.markStartDelay || 0) : sec;
+  // 与划线动画同步：字幕淡入在 [mark.delay + offset, mark.delay + duration] 区间内完成
+  const fadeStart = mark.delay + STATE.subtitleDelay;
+  const fadeDur = Math.max(0.2, mark.duration - STATE.subtitleDelay);
+  return Math.max(0, Math.min(1, (s - fadeStart) / fadeDur));
+}
+
+
+/* ===== 镜头（静态 fit 相机） =====
+ *  保留最小 API：cameraAt(sec) 始终返回一个适应画面的 fit 相机。
+ *  相机动画功能已于 2026-04 移除，理由：UI 不明确、易出错。
+ */
+function defaultCameraState() {
+  const { w: exW, h: exH } = getExportSize();
+  if (!STATE.image) return { cx: 0, cy: 0, zoom: 1 };
+  const fit = Math.min(exW / STATE.imgW, exH / STATE.imgH);
+  return { cx: STATE.imgW / 2, cy: STATE.imgH / 2, zoom: fit };
+}
+
+function cameraAt(_sec) {
+  return defaultCameraState();
+}
+function easeInOutCubic(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+
+/* ---- 字幕控件 ---- */
+$('subEnabled').onchange = e => {
+  STATE.subtitleEnabled = e.target.checked;
+  drawAllMarksFinal();
+};
+$('subMode').onchange = e => {
+  STATE.subtitleMode = e.target.value;
+  // 合并间距行只在合并模式下有意义，但保持始终可见，用户如需调整逐条模式的间距通过 subDelay 等
+  updateWholeTranslationUI();
+  drawAllMarksFinal();
+};
+
+/* 显示/隐藏整段译文编辑区：合并模式才显示；同时同步 textarea 内容与 stale 标记 */
+function updateWholeTranslationUI() {
+  const wrap = $('wholeTranslationWrap');
+  const ta = $('wholeTranslation');
+  const stale = $('wholeTranslationStale');
+  if (!wrap || !ta || !stale) return;
+  if (STATE.subtitleMode === 'combined') {
+    wrap.style.display = '';
+    if (document.activeElement !== ta) ta.value = STATE.wholeTranslation || '';
+    stale.style.display = STATE.wholeTranslationStale && (STATE.wholeTranslation || '').trim() ? '' : 'none';
+  } else {
+    wrap.style.display = 'none';
+  }
+}
+
+/* 标记整段译文为"过期"——划线增删 / 编辑原文都应调用 */
+function invalidateWholeTranslation() {
+  if ((STATE.wholeTranslation || '').trim()) {
+    STATE.wholeTranslationStale = true;
+    updateWholeTranslationUI();
+  }
+}
+
+/* 整段译文 textarea：用户手动编辑 → 同步到 STATE 并重绘 */
+if ($('wholeTranslation')) {
+  let wholeSnapshotted = false;
+  $('wholeTranslation').addEventListener('focus', () => { wholeSnapshotted = false; });
+  $('wholeTranslation').addEventListener('input', e => {
+    if (!wholeSnapshotted) { pushHistory(); wholeSnapshotted = true; }
+    STATE.wholeTranslation = e.target.value;
+    STATE.wholeTranslationStale = false;
+    const stale = $('wholeTranslationStale');
+    if (stale) stale.style.display = 'none';
+    drawAllMarksFinal();
+  });
+}
+$('subCombinedGap').onchange = e => {
+  STATE.subtitleCombinedGap = Math.max(0, parseInt(e.target.value, 10) || 0);
+  drawAllMarksFinal();
+};
+$('subFontColor').onchange = e => {
+  STATE.subtitleFontColor = e.target.value;
+  drawAllMarksFinal();
+};
+$('subFontSize').oninput = e => {
+  STATE.subtitleFontSize = parseInt(e.target.value, 10);
+  $('subFontSizeVal').textContent = STATE.subtitleFontSize;
+  drawAllMarksFinal();
+};
+$('subBold').onchange = e => {
+  STATE.subtitleBold = e.target.checked;
+  drawAllMarksFinal();
+};
+$('subBgColor').onchange = e => {
+  STATE.subtitleBgColor = e.target.value;
+  drawAllMarksFinal();
+};
+$('subBgOpacity').oninput = e => {
+  STATE.subtitleBgOpacity = parseInt(e.target.value, 10);
+  $('subBgOpacityVal').textContent = STATE.subtitleBgOpacity + '%';
+  drawAllMarksFinal();
+};
+$('subRadius').oninput = e => {
+  STATE.subtitleRadius = parseInt(e.target.value, 10);
+  $('subRadiusVal').textContent = STATE.subtitleRadius + 'px';
+  drawAllMarksFinal();
+};
+$('subPadX').onchange = e => {
+  STATE.subtitlePadX = Math.max(0, parseInt(e.target.value, 10) || 0);
+  drawAllMarksFinal();
+};
+$('subPadY').onchange = e => {
+  STATE.subtitlePadY = Math.max(0, parseInt(e.target.value, 10) || 0);
+  drawAllMarksFinal();
+};
+$('subDelay').oninput = e => {
+  STATE.subtitleDelay = parseFloat(e.target.value);
+  $('subDelayVal').textContent = STATE.subtitleDelay.toFixed(2) + 's';
+};
+
+/* ---- 字幕：位置微调 / 描边 / 阴影 ---- */
+$('subOffsetX').onchange = e => {
+  STATE.subtitleOffsetX = parseInt(e.target.value, 10) || 0;
+  drawAllMarksFinal();
+};
+$('subOffsetY').onchange = e => {
+  STATE.subtitleOffsetY = parseInt(e.target.value, 10) || 0;
+  drawAllMarksFinal();
+};
+$('subStrokeColor').onchange = e => {
+  STATE.subtitleStrokeColor = e.target.value;
+  drawAllMarksFinal();
+};
+$('subStrokeWidth').onchange = e => {
+  STATE.subtitleStrokeWidth = Math.max(0, parseFloat(e.target.value) || 0);
+  drawAllMarksFinal();
+};
+$('subShadowColor').onchange = e => {
+  STATE.subtitleShadowColor = e.target.value;
+  drawAllMarksFinal();
+};
+$('subShadowBlur').onchange = e => {
+  STATE.subtitleShadowBlur = Math.max(0, parseFloat(e.target.value) || 0);
+  drawAllMarksFinal();
+};
+$('subShadowOffsetX').onchange = e => {
+  STATE.subtitleShadowOffsetX = parseFloat(e.target.value) || 0;
+  drawAllMarksFinal();
+};
+$('subShadowOffsetY').onchange = e => {
+  STATE.subtitleShadowOffsetY = parseFloat(e.target.value) || 0;
+  drawAllMarksFinal();
+};
+
+/* ---- 翻译方式按钮（整段 / 分句） ---- */
+document.querySelectorAll('.trans-mode-btn').forEach(btn => {
+  btn.onclick = () => {
+    const mode = btn.dataset.mode;
+    document.querySelectorAll('.trans-mode-btn').forEach(b => {
+      const active = b === btn;
+      b.classList.toggle('active', active);
+      b.style.background = active ? '#007aff' : '#fff';
+      b.style.color = active ? '#fff' : '#1d1d1f';
+    });
+    STATE.subtitleMode = mode;
+    const subMode = $('subMode');
+    if (subMode) subMode.value = mode;
+    const hint = $('transModeHint');
+    if (hint) {
+      hint.textContent = mode === 'combined'
+        ? '整段翻译：把所有划线原文拼接后一次翻译，译文连贯；字幕放在最末划线下方。'
+        : '分句翻译：每条划线单独翻译；字幕跟随每条划线单独出现。';
+    }
+    updateWholeTranslationUI();
+    drawAllMarksFinal();
+  };
+});
+
+/* ===== 画布尺寸 & 3D 透视 绑定 ===== */
+const glCanvas = $('glCanvas');
+
+function applyGLModeClass() {
+  const wrap = $('canvasWrap');
+  if (STATE.perspective3D && STATE.image) wrap.classList.add('gl-mode');
+  else wrap.classList.remove('gl-mode');
+}
+
+/* 把 glCanvas 的分辨率和 CSS 尺寸对齐到"视频比例" */
+function resizeGLPreview() {
+  if (!STATE.image) return;
+  const { w: exW, h: exH } = getExportSize();
+  glCanvas.width = exW; glCanvas.height = exH;
+  const area = $('canvasArea');
+  const maxW = area.clientWidth - 60;
+  const maxH = area.clientHeight - 80;
+  const dispS = Math.min(1, maxW / exW, maxH / exH);
+  const dispW = Math.round(exW * dispS);
+  const dispH = Math.round(exH * dispS);
+  glCanvas.style.width = dispW + 'px';
+  glCanvas.style.height = dispH + 'px';
+  if (STATE.perspective3D) {
+    $('canvasWrap').style.width = dispW + 'px';
+    $('canvasWrap').style.height = dispH + 'px';
+  }
+}
+
+let glPreviewScheduled = false;
+function scheduleGLPreview() {
+  if (!STATE.perspective3D || !STATE.image) return;
+  if (glPreviewScheduled) return;
+  glPreviewScheduled = true;
+  requestAnimationFrame(() => {
+    glPreviewScheduled = false;
+    renderGLPreviewNow();
+  });
+}
+
+function renderGLPreviewNow() {
+  if (!STATE.image) return;
+  resizeGLPreview();
+  const { w: exW, h: exH } = getExportSize();
+  // 预览时所有划线都完成（previewTime 取到"全部动画结束"）
+  const previewTime = getTotalDurationSec();
+  const ctx = glCanvas.getContext('2d');
+  // 背景保持透明
+  renderFrameTo(ctx, exW, exH, previewTime, false);
+}
+
+/* 顶部画布尺寸按钮组 ↔ 右侧 <select> 双向同步 */
+function syncAspectButtons() {
+  document.querySelectorAll('.aspect-btn').forEach(b => {
+    const isActive = b.dataset.aspect === STATE.videoAspect;
+    b.style.background = isActive ? '#007aff' : '#fff';
+    b.style.color = isActive ? '#fff' : '#1d1d1f';
+    b.style.borderColor = isActive ? '#007aff' : '#d2d2d7';
+  });
+}
+function setVideoAspect(aspect) {
+  STATE.videoAspect = aspect;
+  if ($('videoAspect')) $('videoAspect').value = aspect;
+  // 把"导出分辨率"下拉也同步过来，让预览 / 导出尺寸与当前画布尺寸一致
+  const exSel = $('exportSize');
+  if (exSel) {
+    if (aspect === '16:9')      exSel.value = '1920x1080';
+    else if (aspect === '9:16') exSel.value = '1080x1920';
+    else                        exSel.value = 'original';
+  }
+  syncAspectButtons();
+  if (typeof updateExportSizeLabel === 'function') updateExportSizeLabel();
+  layoutCanvasFrame();
+  drawAllMarksFinal();
+  if (STATE.perspective3D) { resizeGLPreview(); scheduleGLPreview(); }
+}
+document.querySelectorAll('.aspect-btn').forEach(btn => {
+  btn.addEventListener('click', () => setVideoAspect(btn.dataset.aspect));
+});
+syncAspectButtons();
+
+// 初始化整段译文 UI 的显示/隐藏（默认合并模式 → 显示）
+if (typeof updateWholeTranslationUI === 'function') updateWholeTranslationUI();
+
+$('videoAspect').onchange = e => {
+  setVideoAspect(e.target.value);
+};
+// auto 模式下，切换分辨率也要更新顶部标签
+$('exportSize').addEventListener('change', () => updateExportSizeLabel());
+
+$('docScale').oninput = e => {
+  STATE.docScale = parseInt(e.target.value, 10) / 100;
+  $('docScaleVal').textContent = Math.round(STATE.docScale * 100) + '%';
+  layoutCanvasFrame();
+  scheduleGLPreview();
+};
+$('docOffsetX').oninput = e => {
+  STATE.docOffsetX = parseInt(e.target.value, 10);
+  $('docOffsetXVal').textContent = STATE.docOffsetX;
+  layoutCanvasFrame();
+  scheduleGLPreview();
+};
+$('docOffsetY').oninput = e => {
+  STATE.docOffsetY = parseInt(e.target.value, 10);
+  $('docOffsetYVal').textContent = STATE.docOffsetY;
+  layoutCanvasFrame();
+  scheduleGLPreview();
+};
+$('docRotation').oninput = e => {
+  STATE.docRotation = parseInt(e.target.value, 10) || 0;
+  $('docRotationVal').textContent = STATE.docRotation + '°';
+  layoutCanvasFrame();
+  drawAllMarksFinal();
+  scheduleGLPreview();
+};
+/* 主文献入画动画：下拉 + 两个 slider。slider 的值是"十分之秒"，除以 10 存秒。
+ * 编辑器预览保持"最终状态"（sec = +∞），所以这里只改状态和刷新预览即可。 */
+if ($('docEntrance')) {
+  $('docEntrance').addEventListener('change', e => {
+    STATE.docEntrance = e.target.value;
+    drawAllMarksFinal();
+    scheduleGLPreview && scheduleGLPreview();
+  });
+}
+if ($('docEntranceDelay')) {
+  $('docEntranceDelay').addEventListener('input', e => {
+    const d = parseInt(e.target.value, 10) || 0;
+    STATE.docEntranceDelay = d / 10;
+    $('docEntranceDelayVal').textContent = (d / 10).toFixed(1) + 's';
+  });
+}
+if ($('docEntranceDur')) {
+  $('docEntranceDur').addEventListener('input', e => {
+    const d = Math.max(1, parseInt(e.target.value, 10) || 1);
+    STATE.docEntranceDuration = d / 10;
+    $('docEntranceDurVal').textContent = (d / 10).toFixed(1) + 's';
+  });
+}
+$('perspective3D').onchange = e => {
+  STATE.perspective3D = e.target.checked;
+  applyGLModeClass();
+  if (STATE.perspective3D) {
+    resizeGLPreview();
+    renderGLPreviewNow();
+    $('glStatus').textContent = '3D 透视预览已开启；关闭后可继续编辑';
+  } else {
+    // 恢复 2D 编辑画布尺寸
+    if (STATE.image) restoreEditView();
+    $('glStatus').textContent = 'WebGL 实时预览；导出时使用同样的精确透视';
+  }
+};
+/* 任一 3D 参数被拖动时，若 3D 透视还没开启，就自动帮用户打开——
+ * 这样一拉滑杆就能看到反应，不用先去勾那个复选框。 */
+function ensurePerspective3DOn() {
+  if (STATE.perspective3D) return;
+  STATE.perspective3D = true;
+  const cb = $('perspective3D');
+  if (cb) cb.checked = true;
+  if (typeof applyGLModeClass === 'function') applyGLModeClass();
+  resizeGLPreview();
+  $('glStatus').textContent = '3D 透视已自动开启；关闭后可继续 2D 编辑';
+}
+$('rotX').oninput = e => {
+  STATE.rotX = parseInt(e.target.value, 10);
+  $('rotXVal').textContent = STATE.rotX + '°';
+  ensurePerspective3DOn();
+  scheduleGLPreview();
+};
+$('rotY').oninput = e => {
+  STATE.rotY = parseInt(e.target.value, 10);
+  $('rotYVal').textContent = STATE.rotY + '°';
+  ensurePerspective3DOn();
+  scheduleGLPreview();
+};
+$('rotZ').oninput = e => {
+  STATE.rotZ = parseInt(e.target.value, 10);
+  $('rotZVal').textContent = STATE.rotZ + '°';
+  ensurePerspective3DOn();
+  scheduleGLPreview();
+};
+$('fov').oninput = e => {
+  STATE.perspectiveFov = parseInt(e.target.value, 10);
+  $('fovVal').textContent = STATE.perspectiveFov + '°';
+  ensurePerspective3DOn();
+  scheduleGLPreview();
+};
+$('reset3DBtn').onclick = () => {
+  STATE.rotX = 0; STATE.rotY = 0; STATE.rotZ = 0;
+  STATE.perspectiveFov = 45;
+  STATE.docScale = 1; STATE.docOffsetX = 0; STATE.docOffsetY = 0;
+  ['rotX','rotY','rotZ'].forEach(k => { $(k).value = 0; $(k + 'Val').textContent = '0°'; });
+  $('fov').value = 45; $('fovVal').textContent = '45°';
+  $('docScale').value = 100; $('docScaleVal').textContent = '100%';
+  $('docOffsetX').value = 0; $('docOffsetXVal').textContent = '0';
+  $('docOffsetY').value = 0; $('docOffsetYVal').textContent = '0';
+  layoutCanvasFrame();
+  scheduleGLPreview();
+};
+
+/* ===== 文献阴影（preview / export 用 ctx.shadow*, 编辑画布用 CSS filter）===== */
+function applyDocShadowCSS() {
+  const group = $('canvasGroup');
+  if (!group) return;
+  if (STATE.docShadowEnabled && STATE.docShadowOpacity > 0) {
+    const alpha = (STATE.docShadowOpacity / 100).toFixed(3);
+    // CSS 里把颜色 + alpha 拼成 rgba
+    const hex = STATE.docShadowColor || '#000000';
+    const r = parseInt(hex.slice(1, 3), 16) || 0;
+    const g = parseInt(hex.slice(3, 5), 16) || 0;
+    const b = parseInt(hex.slice(5, 7), 16) || 0;
+    group.style.filter = `drop-shadow(${STATE.docShadowOffsetX}px ${STATE.docShadowOffsetY}px ${STATE.docShadowBlur}px rgba(${r},${g},${b},${alpha}))`;
+  } else {
+    group.style.filter = '';
+  }
+}
+function onDocShadowChange() {
+  applyDocShadowCSS();
+  scheduleGLPreview();
+  // 字幕 / 划线不在阴影里，drawAllMarksFinal 已经把图画出来了，不需要重画
+}
+$('docShadowEnabled').onchange = e => {
+  STATE.docShadowEnabled = e.target.checked;
+  onDocShadowChange();
+};
+$('docShadowBlur').oninput = e => {
+  STATE.docShadowBlur = parseInt(e.target.value, 10) || 0;
+  $('docShadowBlurVal').textContent = STATE.docShadowBlur + 'px';
+  onDocShadowChange();
+};
+$('docShadowOffsetX').oninput = e => {
+  STATE.docShadowOffsetX = parseInt(e.target.value, 10) || 0;
+  $('docShadowOffsetXVal').textContent = STATE.docShadowOffsetX + 'px';
+  onDocShadowChange();
+};
+$('docShadowOffsetY').oninput = e => {
+  STATE.docShadowOffsetY = parseInt(e.target.value, 10) || 0;
+  $('docShadowOffsetYVal').textContent = STATE.docShadowOffsetY + 'px';
+  onDocShadowChange();
+};
+$('docShadowColor').onchange = e => {
+  STATE.docShadowColor = e.target.value;
+  onDocShadowChange();
+};
+$('docShadowOpacity').oninput = e => {
+  STATE.docShadowOpacity = parseInt(e.target.value, 10) || 0;
+  $('docShadowOpacityVal').textContent = STATE.docShadowOpacity + '%';
+  onDocShadowChange();
+};
+
+$('ocrAllBtn').onclick = async () => {
+  if (!STATE.marks.length) { alert('还没有划线'); return; }
+  const btn = $('ocrAllBtn');
+  const status = $('translateStatus');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  const original = btn.textContent;
+  let ok = 0, skip = 0, fail = 0;
+  for (let i = 0; i < STATE.marks.length; i++) {
+    const m = STATE.marks[i];
+    btn.textContent = `识别 ${i + 1}/${STATE.marks.length}…`;
+    if ((m.text || '').trim()) { skip++; continue; }
+    try {
+      const t = await ocrRegion(m);
+      if (t) {
+        pushHistory(); // 每条独立 snapshot，可一条一条撤回
+        m.text = t;
+        ok++;
+        renderMarksList();
+        if (typeof invalidateWholeTranslation === 'function') invalidateWholeTranslation();
+      } else {
+        fail++;
+      }
+    } catch (e) {
+      console.warn('OCR 失败', e);
+      fail++;
+    }
+  }
+  btn.textContent = original;
+  btn.disabled = false;
+  status.textContent = `OCR 完成：识别 ${ok} 条，已有原文跳过 ${skip} 条，失败 ${fail} 条`;
+  status.style.color = fail > 0 ? '#ff3b30' : '#34c759';
+};
+
+$('translateAllBtn').onclick = async () => {
+  if (!STATE.marks.length) { alert('还没有划线'); return; }
+  if (STATE.translating) return;
+  STATE.translating = true;
+  const btn = $('translateAllBtn');
+  const status = $('translateStatus');
+  btn.disabled = true;
+
+  try {
+    if (STATE.subtitleMode === 'combined') {
+      /* 合并模式：一次翻译、一次回写 → 作为一次撤回单元 */
+      const src = getCombinedSourceText();
+      if (!src) {
+        status.textContent = '所有划线都没有原文，无法翻译';
+        status.style.color = '#ff3b30';
+      } else {
+        btn.textContent = '整段翻译中…';
+        try {
+          const zh = await translateText(src, STATE.translateTarget);
+          pushHistory(); // 在写入结果前做一次快照
+          STATE.wholeTranslation = (zh || '').trim();
+          STATE.wholeTranslationStale = false;
+          const zhText = STATE.wholeTranslation;
+          const totalSrc = STATE.marks.map(m => (m.text || '').length).reduce((a, b) => a + b, 0) || 1;
+          let cursor = 0;
+          STATE.marks.forEach((m, i) => {
+            if (m.translation && m.translation.trim()) return;
+            const srcLen = (m.text || '').length;
+            const share = srcLen / totalSrc;
+            const end = (i === STATE.marks.length - 1) ? zhText.length : Math.min(zhText.length, cursor + Math.round(zhText.length * share));
+            m.translation = zhText.slice(cursor, end).trim();
+            cursor = end;
+          });
+          const wholeEl = $('wholeTranslation');
+          if (wholeEl) wholeEl.value = STATE.wholeTranslation;
+          status.textContent = `完成：整段译文 ${STATE.wholeTranslation.length} 字`;
+          status.style.color = '#34c759';
+        } catch (e) {
+          console.error(e);
+          status.textContent = '整段翻译失败：' + (e && e.message ? e.message : '网络/接口错误');
+          status.style.color = '#ff3b30';
+        }
+      }
+    } else {
+      /* 逐条模式：每条翻译前单独 snapshot —— 每条都可以单独撤回 */
+      let ok = 0, fail = 0, skip = 0;
+      for (let i = 0; i < STATE.marks.length; i++) {
+        const m = STATE.marks[i];
+        btn.textContent = `翻译中 ${i + 1}/${STATE.marks.length}…`;
+        if (!m.text) { skip++; continue; }
+        if (m.translation && m.translation.trim()) { skip++; continue; }
+        try {
+          const zh = await translateText(m.text, STATE.translateTarget);
+          pushHistory(); // 每条独立 snapshot，Ctrl+Z 可以一条一条撤
+          m.translation = zh;
+          ok++;
+          renderMarksList();
+          drawAllMarksFinal();
+        } catch (e) {
+          console.error(e);
+          fail++;
+        }
+        await new Promise(r => setTimeout(r, 120));
+      }
+      status.textContent = `完成：新译 ${ok} 条，已有/无原文跳过 ${skip} 条，失败 ${fail} 条`;
+      status.style.color = fail > 0 ? '#ff3b30' : '#34c759';
+    }
+  } finally {
+    btn.textContent = '翻译全部划线';
+    btn.disabled = false;
+    STATE.translating = false;
+    renderMarksList();
+    drawAllMarksFinal();
+  }
+};
+
+/* 简单种子随机：保证同一 mark 每次画的"抖动"一致 */
+function mulberry32(seed) {
+  return function() {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = seed;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ===== 播放预览 ===== */
+$('playBtn').onclick = playPreview;
+$('resetBtn').onclick = resetPreview;
+
+// 预览动画的 rAF 句柄，重置时用它取消；同时把 playing 标志清掉
+let _previewRAF = 0;
+
+/* "重置" = 回到"刚导入文献"那一步：
+ *  - 清掉所有划线、整段译文、撤回历史
+ *  - 把动画 / 字幕 / 反相 / 透明 / 阴影 / 入画 / 3D 透视 / 画布尺寸 全部回到默认值
+ *  - 同步右侧每一个滑杆 / 复选框 / 下拉的 UI 显示
+ *  - 保留正在使用的图片本体 */
+function resetPreview() {
+  if (!STATE.image) return;
+  // 销毁性操作，先确认
+  if (!confirm('确定重置吗？所有划线、翻译和样式调整都会清除，回到刚导入文献的初始状态。')) return;
+
+  // 停止预览动画
+  if (_previewRAF) { cancelAnimationFrame(_previewRAF); _previewRAF = 0; }
+  STATE.playing = false;
+  STATE.previewTime = 0;
+
+  // —— 清空划线 / 译文 / 历史 ——
+  STATE.marks = [];
+  STATE.activeMarkId = null;
+  STATE.cropRect = null;
+  STATE.wholeTranslation = '';
+  STATE.wholeTranslationStale = false;
+  if (typeof clearHistory === 'function') clearHistory();
+
+  // —— 划线样式默认 ——
+  STATE.currentStyle = 'block';
+  STATE.currentColor = '#ffeb3b';
+  STATE.currentOpacity = 50;
+  STATE.currentThickness = 22;
+  STATE.currentRadius = 6;
+  STATE.currentDuration = 1.0;
+  STATE.markStartDelay = 0;
+  STATE.tailHold = 0;
+  STATE.markGlowEnabled = false;
+  STATE.markGlowBlur = 18;
+  STATE.markGlowMode = 'auto';
+  STATE.markGlowColor = '#ffeb3b';
+  STATE.markGlowOpacity = 80;
+
+  // —— 字幕 / 翻译默认 ——
+  STATE.subtitleEnabled = true;
+  STATE.subtitleMode = 'combined';
+  STATE.subtitleFontSize = 28;
+  STATE.subtitleFontColor = '#ffffff';
+  STATE.subtitleBold = true;
+  STATE.subtitleDelay = 0;
+  STATE.subtitleGap = 18;
+  STATE.subtitleBgColor = '#000000';
+  STATE.subtitleBgOpacity = 70;
+  STATE.subtitlePadX = 18;
+  STATE.subtitlePadY = 10;
+  STATE.subtitleRadius = 8;
+  STATE.subtitleCombinedGap = 24;
+  STATE.subtitleOffsetX = 0;
+  STATE.subtitleOffsetY = 0;
+  STATE.subtitleStrokeColor = '#000000';
+  STATE.subtitleStrokeWidth = 0;
+  STATE.subtitleShadowColor = '#000000';
+  STATE.subtitleShadowBlur = 0;
+  STATE.subtitleShadowOffsetX = 0;
+  STATE.subtitleShadowOffsetY = 0;
+
+  // —— 文献颜色反转 / 透明背景 ——
+  STATE.invertDoc = false;
+  STATE.transparentBg = false;
+  STATE.transparentThreshold = 80;
+  // 反相 / 透明缓存只在用到时才重建，这里清空就好
+  STATE._invertedImage = null;
+  STATE._transparentImage = null;
+  STATE._invertedTransparentImage = null;
+
+  // —— 文献阴影默认 ——
+  STATE.docShadowEnabled = false;
+  STATE.docShadowBlur = 30;
+  STATE.docShadowOffsetX = 0;
+  STATE.docShadowOffsetY = 14;
+  STATE.docShadowColor = '#000000';
+  STATE.docShadowOpacity = 45;
+
+  // —— 文献入画动画 ——
+  STATE.docEntrance = 'none';
+  STATE.docEntranceDelay = 0;
+  STATE.docEntranceDuration = 0.8;
+
+  // —— 画布尺寸 / 文献缩放 / 平面旋转 ——
+  STATE.videoAspect = '16:9';
+  STATE.docScale = 1;
+  STATE.docOffsetX = 0;
+  STATE.docOffsetY = 0;
+  STATE.docRotation = 0;
+
+  // —— 3D 透视 ——
+  STATE.perspective3D = false;
+  STATE.rotX = 0;
+  STATE.rotY = 0;
+  STATE.rotZ = 0;
+  STATE.fov = 45;
+
+  // —— 同步全部 UI（右侧每一个 input/select 都对一下当前 STATE） ——
+  const setVal = (id, val, suffix) => {
+    const el = $(id); if (!el) return;
+    el.value = val;
+    const v = $(id + 'Val'); if (v) v.textContent = val + (suffix || '');
+  };
+  const setChk = (id, on) => { const el = $(id); if (el) el.checked = !!on; };
+
+  // 划线样式：默认色块
+  document.querySelectorAll('.style-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.style === 'block');
+  });
+  setVal('opacityRange', 50, '%');
+  setVal('thicknessRange', 22, 'px');
+  setVal('radiusRange', 6, 'px');
+  setVal('durationRange', 10); // 滑杆值，× 0.1 = 秒
+  if ($('durationVal')) $('durationVal').textContent = '1.0s';
+  setVal('startDelayRange', 0); if ($('startDelayVal')) $('startDelayVal').textContent = '0.0s';
+  setVal('tailHoldRange', 0); if ($('tailHoldVal')) $('tailHoldVal').textContent = '0.0s';
+
+  // 划线辉光
+  setChk('markGlowEnabled', false);
+  setVal('markGlowBlur', 18, 'px');
+  if ($('markGlowMode')) $('markGlowMode').value = 'auto';
+  if ($('markGlowColor')) $('markGlowColor').value = '#ffeb3b';
+  setVal('markGlowOpacity', 80, '%');
+  if ($('customColor')) $('customColor').value = '#ffeb3b';
+
+  // 字幕翻译
+  setChk('subEnabled', true);
+  if ($('subMode')) $('subMode').value = 'combined';
+  document.querySelectorAll('.trans-mode-btn').forEach(b => {
+    const active = b.dataset.mode === 'combined';
+    b.classList.toggle('active', active);
+    b.style.background = active ? '#007aff' : '#fff';
+    b.style.color = active ? '#fff' : '#1d1d1f';
+  });
+  setVal('subFontSize', 28); if ($('subFontSizeVal')) $('subFontSizeVal').textContent = '28';
+  if ($('subFontColor')) $('subFontColor').value = '#ffffff';
+  setChk('subBold', true);
+  if ($('subBgColor')) $('subBgColor').value = '#000000';
+  setVal('subBgOpacity', 70, '%');
+  setVal('subRadius', 8, 'px');
+  if ($('subPadX')) $('subPadX').value = 18;
+  if ($('subPadY')) $('subPadY').value = 10;
+  if ($('subCombinedGap')) $('subCombinedGap').value = 24;
+  if ($('subOffsetX')) $('subOffsetX').value = 0;
+  if ($('subOffsetY')) $('subOffsetY').value = 0;
+  if ($('subStrokeColor')) $('subStrokeColor').value = '#000000';
+  if ($('subStrokeWidth')) $('subStrokeWidth').value = 0;
+  if ($('subShadowColor')) $('subShadowColor').value = '#000000';
+  if ($('subShadowBlur')) $('subShadowBlur').value = 0;
+  if ($('subShadowOffsetX')) $('subShadowOffsetX').value = 0;
+  if ($('subShadowOffsetY')) $('subShadowOffsetY').value = 0;
+  if ($('subDelay')) $('subDelay').value = 0;
+  if ($('subDelayVal')) $('subDelayVal').textContent = '0.00s';
+  if ($('wholeTranslation')) $('wholeTranslation').value = '';
+  if ($('wholeTranslationStale')) $('wholeTranslationStale').style.display = 'none';
+  if ($('wholeTranslationWrap')) $('wholeTranslationWrap').style.display = '';
+  if ($('translateStatus')) { $('translateStatus').textContent = ''; $('translateStatus').style.color = ''; }
+  if ($('transModeHint')) $('transModeHint').textContent = '整段翻译：把所有划线原文拼接后一次翻译，译文连贯；字幕放在最末划线下方。';
+
+  // 文献颜色反转 / 透明背景
+  setChk('invertDoc', false);
+  setChk('transparentBg', false);
+  setVal('transparentThreshold', 80);
+  $('canvasWrap').classList.remove('invert-doc', 'transparent-bg');
+
+  // 阴影
+  setChk('docShadowEnabled', false);
+  setVal('docShadowBlur', 30, 'px');
+  setVal('docShadowOffsetX', 0, 'px');
+  setVal('docShadowOffsetY', 14, 'px');
+  if ($('docShadowColor')) $('docShadowColor').value = '#000000';
+  setVal('docShadowOpacity', 45, '%');
+  if (typeof applyDocShadowCSS === 'function') applyDocShadowCSS();
+
+  // 入画动画
+  if ($('docEntrance')) $('docEntrance').value = 'none';
+  setVal('docEntranceDelay', 0); if ($('docEntranceDelayVal')) $('docEntranceDelayVal').textContent = '0.0s';
+  setVal('docEntranceDur', 8); if ($('docEntranceDurVal')) $('docEntranceDurVal').textContent = '0.8s';
+
+  // 画布尺寸 / 文献缩放
+  if ($('videoAspect')) $('videoAspect').value = '16:9';
+  if (typeof syncAspectButtons === 'function') syncAspectButtons();
+  setVal('docScale', 100, '%');
+  setVal('docOffsetX', 0);
+  setVal('docOffsetY', 0);
+  setVal('docRotation', 0, '°');
+  // 同步导出分辨率下拉
+  if ($('exportSize')) $('exportSize').value = '1920x1080';
+
+  // 3D 透视
+  setChk('perspective3D', false);
+  setVal('rotX', 0, '°');
+  setVal('rotY', 0, '°');
+  setVal('rotZ', 0, '°');
+  setVal('fov', 45, '°');
+  if (typeof applyGLModeClass === 'function') applyGLModeClass();
+
+  // —— 重新铺画布 + 重绘 ——
+  imgCanvas.width = STATE.imgW; imgCanvas.height = STATE.imgH;
+  drawCanvas.width = STATE.imgW; drawCanvas.height = STATE.imgH;
+  boxCanvas.width = STATE.imgW; boxCanvas.height = STATE.imgH;
+  layoutCanvasFrame();
+  imgCtx.clearRect(0, 0, STATE.imgW, STATE.imgH);
+  imgCtx.drawImage(getDocSource(), 0, 0);
+  drawAllMarksFinal();
+  if (typeof renderMarksList === 'function') renderMarksList();
+  if (typeof updateWholeTranslationUI === 'function') updateWholeTranslationUI();
+  if (typeof updateExportSizeLabel === 'function') updateExportSizeLabel();
+  if (STATE.perspective3D) { resizeGLPreview(); scheduleGLPreview(); }
+}
+
+function playPreview() {
+  if (STATE.playing || !STATE.marks.length) return;
+  STATE.playing = true;
+
+  // 切到"预览模式"：把 imgCanvas 改成导出尺寸的画布，实时渲染带 camera 的画面
+  const { w: exW, h: exH } = getExportSize();
+  imgCanvas.width = exW; imgCanvas.height = exH;
+  drawCanvas.width = exW; drawCanvas.height = exH;
+  boxCanvas.width = exW; boxCanvas.height = exH;
+  // 调整显示尺寸
+  const area = $('canvasArea');
+  const maxW = area.clientWidth - 60;
+  const maxH = area.clientHeight - 80;
+  const dispS = Math.min(1, maxW / exW, maxH / exH);
+  const dispW = Math.round(exW * dispS);
+  const dispH = Math.round(exH * dispS);
+  [imgCanvas, drawCanvas, boxCanvas].forEach(c => {
+    c.style.width = dispW + 'px';
+    c.style.height = dispH + 'px';
+  });
+  $('canvasWrap').style.width = dispW + 'px';
+  $('canvasWrap').style.height = dispH + 'px';
+  // 把 canvasGroup 恢复成"铺满 wrap"，否则 frame-mode 下 group 还保留着
+  // "文献悬浮在 frame 内"的 left/top/width/height，预览会被左上裁掉。
+  const group = $('canvasGroup');
+  if (group) {
+    group.style.left = '0px';
+    group.style.top = '0px';
+    group.style.width = dispW + 'px';
+    group.style.height = dispH + 'px';
+  }
+  // 保留 frame-mode 的棋盘格背景：用户要求预览 = 导出画布尺寸
+  // （文献浮在 16:9 / 9:16 画框里，背景保持透明）。
+  const isFrame = STATE.videoAspect === '16:9' || STATE.videoAspect === '9:16';
+  $('canvasWrap').classList.toggle('frame-mode', isFrame);
+  // 透明背景模式：预览也保持透明，让棋盘格透上来
+  $('canvasWrap').classList.toggle('transparent-bg', !!STATE.transparentBg);
+  // frame-mode 或 纯文字透明 下预览帧本身用透明背景（棋盘格会透上来），
+  // auto + 不透明 模式仍然保留原图白底，避免 JPG 文献边缘透出棋盘格
+  playPreview._withBg = !(isFrame || STATE.transparentBg);
+
+  const startTime = performance.now();
+  const totalDuration = getTotalDurationSec() * 1000;
+  function frame(now) {
+    // 如果被 resetPreview 中断，就直接停
+    if (!STATE.playing) { _previewRAF = 0; return; }
+    const elapsed = now - startTime;
+    const sec = elapsed / 1000;
+    STATE.previewTime = sec;
+    // 合成到 imgCanvas 上（清空 drawCanvas/boxCanvas）
+    renderFrameTo(imgCtx, exW, exH, sec, playPreview._withBg !== false);
+    drawCtx.clearRect(0, 0, exW, exH);
+    boxCtx.clearRect(0, 0, exW, exH);
+    if (elapsed < totalDuration) {
+      _previewRAF = requestAnimationFrame(frame);
+    } else {
+      STATE.playing = false;
+      STATE.previewTime = totalDuration / 1000;
+      _previewRAF = 0;
+      // 恢复编辑模式
+      restoreEditView();
+    }
+  }
+  _previewRAF = requestAnimationFrame(frame);
+}
+
+function restoreEditView() {
+  if (!STATE.image) return;
+  layoutCanvasFrame();
+  imgCtx.drawImage(getDocSource(), 0, 0);
+  drawAllMarksFinal();
+}
+
+/* ===== OCR 关键词搜索 ===== */
+$('searchBtn').onclick = () => doKeywordSearch();
+$('keywordInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doKeywordSearch();
+});
+
+async function ensureOCR() {
+  if (STATE.ocrData) return STATE.ocrData;
+  if (STATE.ocrWorking) return null;
+  STATE.ocrWorking = true;
+  $('ocrStatus').textContent = '⏳ 正在识别图文（首次需下载模型，约 15s-1min）...';
+  try {
+    const worker = await Tesseract.createWorker(['chi_sim', 'eng'], 1, {
+      logger: m => {
+        if (m.status === 'recognizing text') {
+          $('ocrStatus').textContent = `识别中 ${Math.floor(m.progress * 100)}%`;
+        } else if (m.status) {
+          $('ocrStatus').textContent = m.status;
+        }
+      }
+    });
+    const { data } = await worker.recognize(imgCanvas);
+    await worker.terminate();
+    STATE.ocrData = data;
+    $('ocrStatus').textContent = `✓ OCR 完成，共识别 ${data.words?.length || 0} 个词`;
+    return data;
+  } catch (err) {
+    $('ocrStatus').textContent = '❌ OCR 失败：' + err.message;
+    return null;
+  } finally {
+    STATE.ocrWorking = false;
+  }
+}
+
+// 直接对一个 mark 的选框区域做 OCR（不用全图），更快、更准
+async function ocrRegion(mark) {
+  if (!STATE.image) throw new Error('没图片');
+  // 切出选框子图（带一点 padding 防止贴边）
+  const pad = 6;
+  const sx = Math.max(0, Math.floor(mark.x - pad));
+  const sy = Math.max(0, Math.floor(mark.y - pad));
+  const sw = Math.min(STATE.imgW - sx, Math.ceil(mark.w + pad * 2));
+  const sh = Math.min(STATE.imgH - sy, Math.ceil(mark.h + pad * 2));
+  if (sw < 4 || sh < 4) return '';
+  // 放大 2x 提升小字识别率
+  const off = document.createElement('canvas');
+  const scale = sh < 80 ? 2 : 1;
+  off.width = sw * scale; off.height = sh * scale;
+  const offCtx = off.getContext('2d');
+  offCtx.imageSmoothingQuality = 'high';
+  offCtx.drawImage(STATE.image, sx, sy, sw, sh, 0, 0, off.width, off.height);
+  // 创建临时 worker（不缓存到 STATE.ocrData，避免影响关键词搜索的全图 OCR）
+  const worker = await Tesseract.createWorker(['chi_sim', 'eng'], 1, {
+    logger: m => {
+      if (m.status === 'recognizing text') {
+        // 静默
+      }
+    }
+  });
+  try {
+    const { data } = await worker.recognize(off);
+    return (data.text || '').replace(/\s+\n/g, '\n').replace(/\n+/g, ' ').trim();
+  } finally {
+    await worker.terminate();
+  }
+}
+
+async function doKeywordSearch() {
+  const kw = $('keywordInput').value.trim();
+  if (!kw) return;
+  const data = await ensureOCR();
+  if (!data || !data.words) return;
+  // 简单匹配：查找包含关键词的连续词
+  const found = [];
+  const lower = kw.toLowerCase();
+  // 中文按字符搜，英文按词搜
+  const isCN = /[\u4e00-\u9fa5]/.test(kw);
+  if (isCN) {
+    // 中文：尝试在 lines 文本里找
+    (data.lines || []).forEach(line => {
+      const text = line.text || '';
+      let idx = text.indexOf(kw);
+      if (idx >= 0 && line.bbox) {
+        // 用整行的 bbox（粗略）
+        const b = line.bbox;
+        found.push({ x: b.x0, y: b.y0, w: b.x1 - b.x0, h: b.y1 - b.y0, text: line.text.trim() });
+      }
+    });
+  } else {
+    // 英文：在 words 里找连续匹配
+    const words = data.words;
+    const tokens = lower.split(/\s+/);
+    for (let i = 0; i <= words.length - tokens.length; i++) {
+      let match = true;
+      for (let j = 0; j < tokens.length; j++) {
+        const wt = (words[i + j].text || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!wt.includes(tokens[j])) { match = false; break; }
+      }
+      if (match) {
+        const b0 = words[i].bbox, b1 = words[i + tokens.length - 1].bbox;
+        found.push({
+          x: b0.x0, y: Math.min(b0.y0, b1.y0),
+          w: b1.x1 - b0.x0, h: Math.max(b0.y1, b1.y1) - Math.min(b0.y0, b1.y0),
+          text: tokens.join(' ')
+        });
+      }
+    }
+  }
+  if (!found.length) {
+    $('ocrStatus').textContent = `没有找到 "${kw}"`;
+    return;
+  }
+  // 每一条划线独立 snapshot，允许 Ctrl+Z 一条一条地撤回
+  found.forEach(f => addMark(f));
+  $('ocrStatus').textContent = `✓ 添加了 ${found.length} 处划线`;
+}
+
+/* ===== WebGL 3D 透视管线 =====
+ * sceneCanvas: 2D 合成好的"平面场景" (image + marks + subtitles)，用作纹理源
+ * glRenderCanvas: 离屏 WebGL 画布，负责把 sceneCanvas 以 3D 透视的方式绘出
+ * glCanvas: 页面上那块"预览用"的 WebGL 画布；不参与导出，只给用户看
+ */
+const SCENE = { canvas: null, w: 0, h: 0 };
+const GL_RENDER = { canvas: null, gl: null, w: 0, h: 0, prog: null, vbo: null, tex: null };
+
+function getSceneCanvas(w, h) {
+  if (!SCENE.canvas) SCENE.canvas = document.createElement('canvas');
+  if (SCENE.w !== w || SCENE.h !== h) {
+    SCENE.canvas.width = w; SCENE.canvas.height = h;
+    SCENE.w = w; SCENE.h = h;
+  }
+  return SCENE.canvas;
+}
+
+function initGL(canvas) {
+  const gl = canvas.getContext('webgl', { premultipliedAlpha: false, preserveDrawingBuffer: true, alpha: true });
+  if (!gl) throw new Error('浏览器不支持 WebGL');
+  const vsSrc = `
+    attribute vec2 aPos;
+    attribute vec2 aUV;
+    uniform mat4 uMVP;
+    varying vec2 vUV;
+    void main() {
+      vUV = aUV;
+      gl_Position = uMVP * vec4(aPos, 0.0, 1.0);
+    }
+  `;
+  const fsSrc = `
+    precision mediump float;
+    varying vec2 vUV;
+    uniform sampler2D uTex;
+    void main() {
+      gl_FragColor = texture2D(uTex, vUV);
+    }
+  `;
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  }
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+
+  // 单位方形：x 和 y ∈ [-1, 1]，UV [0,1]；y 在 UV 里翻转（canvas 原点左上，GL 原点左下）
+  const verts = new Float32Array([
+    // pos       // uv
+    -1, -1,      0, 1,
+     1, -1,      1, 1,
+    -1,  1,      0, 0,
+     1,  1,      1, 0,
+  ]);
+  const vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'aPos');
+  const aUV = gl.getAttribLocation(prog, 'aUV');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0);
+  gl.enableVertexAttribArray(aUV);
+  gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 16, 8);
+
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+  return { gl, prog, vbo, tex, aPos, aUV, uMVP: gl.getUniformLocation(prog, 'uMVP'), uTex: gl.getUniformLocation(prog, 'uTex') };
+}
+
+/* --- 4×4 矩阵（列主序）辅助 --- */
+function matIdentity() { return [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]; }
+function matMul(a, b) {
+  const o = new Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+    o[c*4+r] = a[0*4+r]*b[c*4+0] + a[1*4+r]*b[c*4+1] + a[2*4+r]*b[c*4+2] + a[3*4+r]*b[c*4+3];
+  }
+  return o;
+}
+function matRotX(rad) { const c=Math.cos(rad),s=Math.sin(rad); return [1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]; }
+function matRotY(rad) { const c=Math.cos(rad),s=Math.sin(rad); return [c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]; }
+function matRotZ(rad) { const c=Math.cos(rad),s=Math.sin(rad); return [c,s,0,0, -s,c,0,0, 0,0,1,0, 0,0,0,1]; }
+function matTrans(x,y,z) { return [1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,z,1]; }
+function matScale(x,y,z) { return [x,0,0,0, 0,y,0,0, 0,0,z,0, 0,0,0,1]; }
+function matPerspective(fovYRad, aspect, near, far) {
+  const f = 1 / Math.tan(fovYRad / 2);
+  const nf = 1 / (near - far);
+  return [
+    f/aspect, 0, 0, 0,
+    0, f, 0, 0,
+    0, 0, (far + near) * nf, -1,
+    0, 0, 2 * far * near * nf, 0,
+  ];
+}
+
+/* 用当前 STATE 的 rotX/rotY/rotZ/fov 把 sceneCanvas 透视渲染到 glRenderCanvas */
+function renderGLFromScene(sceneCanvas, exW, exH) {
+  if (!GL_RENDER.canvas) GL_RENDER.canvas = document.createElement('canvas');
+  if (GL_RENDER.w !== exW || GL_RENDER.h !== exH || !GL_RENDER.gl) {
+    GL_RENDER.canvas.width = exW;
+    GL_RENDER.canvas.height = exH;
+    GL_RENDER.w = exW; GL_RENDER.h = exH;
+    const ctx = initGL(GL_RENDER.canvas);
+    Object.assign(GL_RENDER, ctx);
+  }
+  const gl = GL_RENDER.gl;
+  gl.viewport(0, 0, exW, exH);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(GL_RENDER.prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, GL_RENDER.vbo);
+  gl.vertexAttribPointer(GL_RENDER.aPos, 2, gl.FLOAT, false, 16, 0);
+  gl.vertexAttribPointer(GL_RENDER.aUV, 2, gl.FLOAT, false, 16, 8);
+
+  // 上传纹理
+  gl.bindTexture(gl.TEXTURE_2D, GL_RENDER.tex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sceneCanvas);
+  gl.uniform1i(GL_RENDER.uTex, 0);
+
+  // MVP: 绕原点旋转（ZYX 顺序），再平移到 -cameraZ，再透视
+  const fovY = STATE.perspectiveFov * Math.PI / 180;
+  const aspect = exW / exH;
+  // 把相机距离设为"无旋转时 quad 正好撑满视口"
+  const cameraZ = 1 / Math.tan(fovY / 2);
+  const rx = STATE.rotX * Math.PI / 180;
+  const ry = STATE.rotY * Math.PI / 180;
+  const rz = STATE.rotZ * Math.PI / 180;
+  // quad 原生是 x∈[-1,1], y∈[-1,1]。要变成视口 aspect，x 乘 aspect
+  // 但我们改成：projection 的 aspect 已经考虑了 aspect，所以 quad 保持单位方形
+  // 需要让 quad 的实际宽高比匹配 exW:exH。projection 已经把 aspect 放进 X 了，所以 quad 的 X 边要是 aspect，Y 边是 1
+  const modelScale = matScale(aspect, 1, 1);
+  const model = matMul(matRotZ(rz), matMul(matRotY(ry), matMul(matRotX(rx), modelScale)));
+  const view = matTrans(0, 0, -cameraZ);
+  const proj = matPerspective(fovY, aspect, 0.01, 100);
+  const mvp = matMul(proj, matMul(view, model));
+  gl.uniformMatrix4fv(GL_RENDER.uMVP, false, new Float32Array(mvp));
+
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  return GL_RENDER.canvas;
+}
+
+function updateExportSizeLabel() {
+  const el = $('exportSizeLabel');
+  if (!el) return;
+  const { w, h } = getExportSize();
+  const tag =
+    STATE.videoAspect === '16:9' ? '横屏 16:9' :
+    STATE.videoAspect === '9:16' ? '竖屏 9:16' : '原图尺寸';
+  el.textContent = `预览 = 导出尺寸 · ${tag} · ${w}×${h}`;
+}
+
+function getExportSize() {
+  // 视频比例优先覆盖 exportSize
+  if (STATE.videoAspect === '16:9') return { w: 1920, h: 1080 };
+  if (STATE.videoAspect === '9:16') return { w: 1080, h: 1920 };
+  const v = $('exportSize').value;
+  if (v === 'original') return { w: STATE.imgW, h: STATE.imgH };
+  const [w, h] = v.split('x').map(Number);
+  return { w, h };
+}
+
+/* 文献在画布里的基础缩放（保留宽高比，把最长边贴合画布） */
+function getBaseDocFit(exW, exH) {
+  if (!STATE.imgW || !STATE.imgH) return 1;
+  return Math.min(exW / STATE.imgW, exH / STATE.imgH);
+}
+
+/* 只画 2D 场景（图 + 划线 + 字幕 + camera zoom + 文献偏移/缩放）到任意 2D ctx */
+function renderSceneTo(ctx, exportW, exportH, sec, withBg = true) {
+  ctx.clearRect(0, 0, exportW, exportH);
+  // withBg=true → 老版本"纯白底"（用于导出 MP4 / MOV 不透明场景）
+  // withBg=false → 保持透明（用于 PNG 序列 / WebGL 纹理 / 16:9 & 9:16 预览帧）
+  if (withBg) {
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, exportW, exportH);
+  }
+  if (!STATE.image) return;
+  const cam = cameraAt(sec);
+  const progressMap = progressMapAt(sec);
+  // cam.zoom 已经是"doc 像素 → 画布像素"的绝对比例（defaultCameraState 返回的就是 fit），
+  // 再乘 baseFit 会造成 fit² 的二次缩放（= 画面被挤小 / 被裁一块）。
+  const finalScale = STATE.docScale * cam.zoom;
+  const docCX = exportW / 2 + (STATE.docOffsetX / 100) * (exportW / 2);
+  const docCY = exportH / 2 + (STATE.docOffsetY / 100) * (exportH / 2);
+
+  // === 主文献入画动画 ===
+  // entrance ∈ 'none' | 'fade' | 'flip' | 'slide-left/right/top/bottom' | 'zoom'
+  // sec 是当前帧时间（秒）；编辑器预览时 sec 为 +∞ 或足够大 → 动画走到 1（完成态）。
+  const __ent = STATE.docEntrance || 'none';
+  const __entDelay = STATE.docEntranceDelay || 0;
+  const __entDur = Math.max(0.001, STATE.docEntranceDuration || 0.8);
+  let __entProg = 1;
+  if (typeof sec === 'number' && isFinite(sec) && __ent !== 'none') {
+    if (sec < __entDelay) __entProg = 0;
+    else __entProg = Math.min(1, (sec - __entDelay) / __entDur);
+  }
+  const __eased = 1 - Math.pow(1 - __entProg, 3);
+  let __entOffX = 0, __entOffY = 0, __entAlpha = 1, __entFX = 1, __entFY = 1;
+  if      (__ent === 'fade')         __entAlpha = __eased;
+  else if (__ent === 'zoom')       { __entAlpha = __eased; __entFX = __entFY = 0.3 + 0.7 * __eased; }
+  else if (__ent === 'flip')       { __entAlpha = __eased; __entFX = __eased; }
+  else if (__ent === 'slide-left')   { __entOffX = -exportW * (1 - __eased); __entAlpha = __eased; }
+  else if (__ent === 'slide-right')  { __entOffX =  exportW * (1 - __eased); __entAlpha = __eased; }
+  else if (__ent === 'slide-top')    { __entOffY = -exportH * (1 - __eased); __entAlpha = __eased; }
+  else if (__ent === 'slide-bottom') { __entOffY =  exportH * (1 - __eased); __entAlpha = __eased; }
+  // 完全透明时直接跳过（既省算力也防止字幕/划线漏出来）
+  if (__entAlpha <= 0) return;
+
+  // 进入主文献坐标系：主图 + 划线 + 字幕 都跟着镜头/缩放一起推拉
+  ctx.save();
+  ctx.globalAlpha *= __entAlpha;
+  ctx.translate(docCX + __entOffX, docCY + __entOffY);
+  if (__entFX !== 1 || __entFY !== 1) ctx.scale(__entFX, __entFY);
+  ctx.scale(finalScale, finalScale);
+  // 平面旋转（2D）：围绕主文献中心旋转，在缩放后的坐标系里按弧度应用
+  if (STATE.docRotation) {
+    ctx.rotate(STATE.docRotation * Math.PI / 180);
+  }
+  ctx.translate(-cam.cx, -cam.cy);
+
+  // 文献阴影：在画主图之前通过 ctx.shadow* 让 drawImage 附带阴影。
+  // ctx.shadowBlur/Offset 受到当前变换矩阵影响 —— 所以要除以 finalScale，保证 "用户滑杆里写的 px" 是屏幕/导出像素而不是文献像素。
+  if (STATE.docShadowEnabled && STATE.docShadowOpacity > 0) {
+    const s = finalScale || 1;
+    const hex = STATE.docShadowColor || '#000000';
+    const r = parseInt(hex.slice(1, 3), 16) || 0;
+    const g = parseInt(hex.slice(3, 5), 16) || 0;
+    const b = parseInt(hex.slice(5, 7), 16) || 0;
+    const a = STATE.docShadowOpacity / 100;
+    ctx.shadowColor = `rgba(${r},${g},${b},${a})`;
+    ctx.shadowBlur = STATE.docShadowBlur / s;
+    ctx.shadowOffsetX = STATE.docShadowOffsetX / s;
+    ctx.shadowOffsetY = STATE.docShadowOffsetY / s;
+  }
+  // 不管 withBg 是什么，文献图本身都要画出来——否则 frame-mode 透明预览 / GL 透视
+  // 都会只剩 marks 浮在空画布上。withBg 只控制"画布底色要不要白"。
+  ctx.drawImage(getDocSource(), 0, 0);
+  // 关闭阴影，后续 marks / 字幕不要再带阴影
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+  ctx.shadowColor = 'transparent';
+  // 反相模式：把划线区"反相 → 原图"打回去，得到"高亮色 + 黑色原文"
+  if (STATE.invertDoc) {
+    STATE.marks.forEach(m => {
+      const p = progressMap[m.id] ?? 1;
+      if (p <= 0) return;
+      if (m.style === 'highlight' || m.style === 'block') {
+        ctx.globalCompositeOperation = 'source-over';
+        punchOriginalUnderMark(ctx, m, p);
+      }
+    });
+  }
+  // 划线统一用 multiply 压在文字下方（不论是否反相）：
+  //  - 白底文献：黄×白=黄、黄×黑=黑，文字保留为深色
+  //  - 反相文献：上面已经把划线区打回原图（白底黑字），multiply 后同样得到"黄底黑字"
+  const blend = 'multiply';
+  // 先画负片（source-over 直接替换像素），再画荧光笔/手绘（带 multiply 让颜色压在文字下面）
+  // 这样 负片 先贴好，荧光笔若叠在其上也能正确与负片像素乘
+  STATE.marks.forEach(m => {
+    const p = progressMap[m.id] ?? 1;
+    if (p <= 0) return;
+    if (isNegativeStyle(m.style)) {
+      ctx.globalCompositeOperation = 'source-over';
+      drawMarkOnContext(ctx, m, p);
+    }
+  });
+  STATE.marks.forEach(m => {
+    const p = progressMap[m.id] ?? 1;
+    if (p > 0 && !isNegativeStyle(m.style)) {
+      ctx.globalCompositeOperation = blend;
+      drawMarkOnContext(ctx, m, p);
+      ctx.globalCompositeOperation = 'source-over';
+    }
+    // 分句模式：每条划线下方独立字幕
+    if (STATE.subtitleMode !== 'combined') {
+      const subP = subtitleProgressAt(m, sec);
+      if (subP > 0) drawSubtitleOnContext(ctx, m, subP);
+    }
+  });
+  // 合并模式：所有划线绘制完毕后统一画一个大字幕块
+  if (STATE.subtitleMode === 'combined') {
+    drawCombinedSubtitleOnContext(ctx, sec);
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.restore();
+}
+
+/* 对外统一入口：render 一帧（含 3D）到给定 2D ctx 的 (exportW, exportH) 区域 */
+function renderFrameTo(ctx, exportW, exportH, sec, withBg = true) {
+  // 先把 2D 场景合成到 sceneCanvas
+  const scene = getSceneCanvas(exportW, exportH);
+  renderSceneTo(scene.getContext('2d'), exportW, exportH, sec, withBg);
+  if (STATE.perspective3D) {
+    // 经 WebGL 透视后画到目标 ctx
+    const gl = renderGLFromScene(scene, exportW, exportH);
+    ctx.clearRect(0, 0, exportW, exportH);
+    if (withBg) { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, exportW, exportH); }
+    ctx.drawImage(gl, 0, 0);
+  } else {
+    ctx.clearRect(0, 0, exportW, exportH);
+    ctx.drawImage(scene, 0, 0);
+  }
+}
+
+function getTotalDurationSec() {
+  if (!STATE.marks.length) return 0;
+  // 字幕与划线同步淡入，总时长仅按划线尾算；
+  // 再加上"空白文献停留"（起始）和"结尾停留"（尾部定格）两段全局延迟
+  const core = Math.max(...STATE.marks.map(m => m.delay + m.duration)) + 0.8;
+  return core + (STATE.markStartDelay || 0) + (STATE.tailHold || 0);
+}
+
+function progressMapAt(sec) {
+  const map = {};
+  // 在 markStartDelay 之前所有划线 progress = 0（空白文献停留阶段）
+  const s = (typeof sec === 'number' && isFinite(sec)) ? sec - (STATE.markStartDelay || 0) : sec;
+  STATE.marks.forEach(m => {
+    const lt = (s - m.delay) / m.duration;
+    map[m.id] = Math.max(0, Math.min(1, lt));
+  });
+  return map;
+}
+
+/* ---- MP4 导出（基于 MediaRecorder） ---- */
+$('exportVideoBtn').onclick = async () => {
+  if (!STATE.image || !STATE.marks.length) {
+    $('exportStatus').textContent = '请先上传图片并添加划线';
+    return;
+  }
+  const fps = +$('exportFps').value;
+  const { w, h } = getExportSize();
+  const totalSec = getTotalDurationSec();
+  const totalFrames = Math.ceil(totalSec * fps);
+
+  const off = document.createElement('canvas');
+  off.width = w; off.height = h;
+  const ctx = off.getContext('2d');
+
+  // 选择 mime
+  const candidates = [
+    'video/mp4;codecs=avc1.42E01E',
+    'video/mp4',
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm'
+  ];
+  let mime = candidates.find(m => MediaRecorder.isTypeSupported(m)) || '';
+  const ext = mime.startsWith('video/mp4') ? 'mp4' : 'webm';
+
+  const stream = off.captureStream(fps);
+  const recorder = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 8000000 } : { videoBitsPerSecond: 8000000 });
+  const chunks = [];
+  recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+
+  $('exportStatus').textContent = `录制中 (${ext.toUpperCase()})...`;
+  $('exportProgress').style.width = '0%';
+  $('exportVideoBtn').disabled = true;
+
+  await new Promise(resolve => {
+    recorder.onstop = resolve;
+    recorder.start();
+    let frame = 0;
+    function tick() {
+      if (frame >= totalFrames) {
+        recorder.stop();
+        return;
+      }
+      const sec = frame / fps;
+      renderFrameTo(ctx, w, h, sec, true);
+      $('exportProgress').style.width = (frame / totalFrames * 100) + '%';
+      frame++;
+      // 用 setTimeout 让 captureStream 跟上节奏
+      setTimeout(tick, 1000 / fps);
+    }
+    tick();
+  });
+
+  const blob = new Blob(chunks, { type: mime || 'video/webm' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `highlight_${Date.now()}.${ext}`;
+  a.click();
+  URL.revokeObjectURL(url);
+  $('exportStatus').textContent = `✓ 已导出 ${ext.toUpperCase()} (${(blob.size/1024/1024).toFixed(1)} MB)`;
+  $('exportProgress').style.width = '100%';
+  $('exportVideoBtn').disabled = false;
+};
+
+/* ---- PNG 序列导出 ---- */
+async function exportPngSequence(withBg) {
+  if (!STATE.image || !STATE.marks.length) {
+    $('exportStatus').textContent = '请先上传图片并添加划线';
+    return;
+  }
+  const fps = +$('exportFps').value;
+  const { w, h } = getExportSize();
+  const totalSec = getTotalDurationSec();
+  const totalFrames = Math.ceil(totalSec * fps);
+  const off = document.createElement('canvas');
+  off.width = w; off.height = h;
+  const ctx = off.getContext('2d');
+
+  const zip = new JSZip();
+  $('exportStatus').textContent = `生成 PNG 序列 (${totalFrames} 帧)...`;
+  $('exportProgress').style.width = '0%';
+
+  for (let f = 0; f < totalFrames; f++) {
+    const sec = f / fps;
+    renderFrameTo(ctx, w, h, progressMapAt(sec), withBg);
+    const blob = await new Promise(r => off.toBlob(r, 'image/png'));
+    const buf = await blob.arrayBuffer();
+    zip.file(`frame_${String(f).padStart(5, '0')}.png`, buf);
+    if (f % 5 === 0) {
+      $('exportProgress').style.width = (f / totalFrames * 100) + '%';
+      $('exportStatus').textContent = `生成 PNG ${f}/${totalFrames}`;
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+  $('exportStatus').textContent = `打包 ZIP 中...`;
+  const zipBlob = await zip.generateAsync({ type: 'blob' }, meta => {
+    $('exportProgress').style.width = (meta.percent) + '%';
+  });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(zipBlob);
+  a.download = `png_sequence_${withBg ? 'bg' : 'transparent'}_${Date.now()}.zip`;
+  a.click();
+  $('exportStatus').textContent = `✓ 已导出 PNG 序列 (${(zipBlob.size/1024/1024).toFixed(1)} MB, ${totalFrames} 帧, ${fps}fps)`;
+  $('exportProgress').style.width = '100%';
+}
+$('exportPngBgBtn').onclick = () => exportPngSequence(true);
+$('exportPngTransBtn').onclick = () => exportPngSequence(false);
+
+/* ================================================================
+ *  纯 JS QuickTime MOV (PNG-in-MOV) 构建器
+ *  支持 alpha 通道，剪映/CapCut/Premiere/DaVinci/FCP 均可导入
+ *  ---
+ *  原理：把每一帧 Canvas 生成的 PNG 字节直接塞进 mdat，
+ *  用 stsd 声明 codec 为 'png '，QuickTime 按 PNG 解码，
+ *  alpha 通道完整保留。没有再编码环节，所以速度快；
+ *  透明背景下绝大多数像素是透明的，PNG deflate 压缩率高，
+ *  所以整个 MOV 文件很小。
+ * ================================================================ */
+const MOV = (() => {
+  // ---- 字节工具 ----
+  const u32 = n => new Uint8Array([(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255]);
+  const u16 = n => new Uint8Array([(n>>>8)&255,n&255]);
+  const s4  = s => new Uint8Array([s.charCodeAt(0),s.charCodeAt(1),s.charCodeAt(2),s.charCodeAt(3)]);
+  const concat = parts => {
+    let len = 0; parts.forEach(p => len += p.length);
+    const out = new Uint8Array(len);
+    let off = 0;
+    for (const p of parts) { out.set(p, off); off += p.length; }
+    return out;
+  };
+  // atom: 4字节长度 + 4字节类型 + payload
+  const atom = (type, ...payload) => {
+    const body = concat(payload);
+    return concat([u32(body.length + 8), s4(type), body]);
+  };
+  const zeros = n => new Uint8Array(n);
+
+  // ---- 构建 MOV 文件 ----
+  // frames: Uint8Array[] (每帧的 PNG 字节)
+  // w, h: 像素尺寸
+  // fps: 帧率
+  function build(frames, w, h, fps) {
+    const nFrames = frames.length;
+    const timescale = fps;       // 每秒 fps 个 tick
+    const sampleDur = 1;         // 每帧 1 tick
+    const duration  = nFrames * sampleDur;
+
+    // ---- ftyp ----
+    // major brand 'qt  ', minor 0x0000200, compatible ['qt  ']
+    const ftyp = atom('ftyp',
+      s4('qt  '),
+      u32(0x00000200),
+      s4('qt  ')
+    );
+
+    // ---- mdat (PNG 字节流) ----
+    const mdatHeaderSize = 8;
+    const mdatBody = concat(frames);
+    const mdat = concat([u32(mdatBody.length + mdatHeaderSize), s4('mdat'), mdatBody]);
+    // 每帧在文件里的偏移：mdat 数据区开始 = ftyp.length + 8(mdat头)
+    const mdatDataOffset = ftyp.length + mdatHeaderSize;
+    // 样本大小表
+    const sampleSizes = frames.map(f => f.length);
+
+    // ---- mvhd ----
+    // version(1) flags(3) ctime(4) mtime(4) timescale(4) duration(4)
+    // rate(4) volume(2) reserved(10) matrix(36) pre_defined(24) next_track_id(4)
+    const matrix = concat([
+      u32(0x00010000), u32(0), u32(0),
+      u32(0), u32(0x00010000), u32(0),
+      u32(0), u32(0), u32(0x40000000),
+    ]);
+    const mvhd = atom('mvhd',
+      new Uint8Array([0,0,0,0]),       // version+flags
+      u32(0), u32(0),                  // ctime, mtime
+      u32(timescale),                  // movie timescale
+      u32(duration),                   // movie duration
+      u32(0x00010000),                 // rate 1.0
+      u16(0x0100),                     // volume 1.0
+      zeros(10),                       // reserved
+      matrix,                          // matrix
+      zeros(24),                       // pre_defined
+      u32(2)                           // next_track_id
+    );
+
+    // ---- tkhd ----
+    const tkhd = atom('tkhd',
+      new Uint8Array([0,0,0,0x07]),    // version+flags(enabled|inMovie|inPreview)
+      u32(0), u32(0),                  // ctime, mtime
+      u32(1),                          // track_id
+      u32(0),                          // reserved
+      u32(duration),                   // duration (movie timescale)
+      zeros(8),                        // reserved
+      u16(0), u16(0),                  // layer, alt group
+      u16(0),                          // volume
+      u16(0),                          // reserved
+      matrix,                          // matrix
+      u32(w << 16),                    // width (16.16 fixed)
+      u32(h << 16)                     // height
+    );
+
+    // ---- mdhd ----
+    const mdhd = atom('mdhd',
+      new Uint8Array([0,0,0,0]),
+      u32(0), u32(0),
+      u32(timescale),
+      u32(duration),
+      u16(0x55c4),                     // language 'und'
+      u16(0)                           // quality
+    );
+
+    // ---- hdlr (media handler = video) ----
+    const hdlr = atom('hdlr',
+      new Uint8Array([0,0,0,0]),
+      s4('mhlr'),                      // component_type
+      s4('vide'),                      // component_subtype
+      s4('appl'),                      // manufacturer
+      u32(0), u32(0),                  // flags, flags_mask
+      new Uint8Array([0])              // empty pascal string name
+    );
+
+    // ---- vmhd ----
+    const vmhd = atom('vmhd',
+      new Uint8Array([0,0,0,1]),       // flags = 1
+      u16(0),                          // graphics mode (copy)
+      u16(0), u16(0), u16(0)           // opcolor RGB
+    );
+
+    // ---- dinf / dref (self-contained) ----
+    const dref = atom('dref',
+      new Uint8Array([0,0,0,0]),
+      u32(1),                          // entry count
+      atom('url ', new Uint8Array([0,0,0,1])) // self-reference
+    );
+    const dinf = atom('dinf', dref);
+
+    // ---- stsd 样本描述：codec 'png ' ----
+    // SampleEntry header(8) + VideoSampleEntry(78) = 86 bytes (excluding 8-byte atom header)
+    // atom 'png ' 本身是 SampleEntry
+    const compressorName = new Uint8Array(32);
+    const nameStr = 'PNG';
+    compressorName[0] = nameStr.length;
+    for (let i = 0; i < nameStr.length; i++) compressorName[i+1] = nameStr.charCodeAt(i);
+
+    const pngSampleEntry = atom('png ',
+      zeros(6),                        // reserved
+      u16(1),                          // data_reference_index
+      // VisualSampleEntry body
+      u16(0),                          // version
+      u16(0),                          // revision level
+      s4('appl'),                      // vendor
+      u32(0),                          // temporal quality
+      u32(0x200),                      // spatial quality
+      u16(w), u16(h),                  // width, height
+      u32(0x00480000),                 // horiz_res 72dpi
+      u32(0x00480000),                 // vert_res
+      u32(0),                          // data size
+      u16(1),                          // frame count per sample
+      compressorName,                  // 32 byte pascal string
+      u16(32),                         // depth (32 = RGBA)
+      u16(0xFFFF)                      // color table id (-1, none)
+    );
+    const stsd = atom('stsd',
+      new Uint8Array([0,0,0,0]),
+      u32(1),                          // entry count
+      pngSampleEntry
+    );
+
+    // ---- stts (每帧时长都是 1) ----
+    const stts = atom('stts',
+      new Uint8Array([0,0,0,0]),
+      u32(1),                          // entry count
+      u32(nFrames),                    // sample count
+      u32(sampleDur)                   // sample delta
+    );
+
+    // ---- stsc (所有样本在一个 chunk) ----
+    const stsc = atom('stsc',
+      new Uint8Array([0,0,0,0]),
+      u32(1),                          // entry count
+      u32(1),                          // first_chunk
+      u32(nFrames),                    // samples_per_chunk
+      u32(1)                           // sample_description_index
+    );
+
+    // ---- stsz (每个样本大小) ----
+    const sizes = concat(sampleSizes.map(u32));
+    const stsz = atom('stsz',
+      new Uint8Array([0,0,0,0]),
+      u32(0),                          // sample_size = 0 表示使用下方列表
+      u32(nFrames),                    // sample_count
+      sizes
+    );
+
+    // ---- stco (chunk 偏移) ----
+    const stco = atom('stco',
+      new Uint8Array([0,0,0,0]),
+      u32(1),                          // entry count
+      u32(mdatDataOffset)              // chunk 0 的绝对文件偏移
+    );
+
+    // ---- 组合 stbl → minf → mdia → trak → moov ----
+    const stbl = atom('stbl', stsd, stts, stsc, stsz, stco);
+    const minf = atom('minf', vmhd, dinf, stbl);
+    const mdia = atom('mdia', mdhd, hdlr, minf);
+    const trak = atom('trak', tkhd, mdia);
+    const moov = atom('moov', mvhd, trak);
+
+    // 最终：ftyp + mdat + moov
+    return concat([ftyp, mdat, moov]);
+  }
+
+  return { build };
+})();
+
+/* ---- 导出 MOV ---- */
+async function exportMOV(withBg) {
+  if (!STATE.image || !STATE.marks.length) {
+    $('exportStatus').textContent = '请先上传图片并添加划线';
+    return;
+  }
+  const fps = +$('exportFps').value;
+  const { w, h } = getExportSize();
+  const totalSec = getTotalDurationSec();
+  const totalFrames = Math.ceil(totalSec * fps);
+  const off = document.createElement('canvas');
+  off.width = w; off.height = h;
+  const ctx = off.getContext('2d');
+
+  $('exportStatus').textContent = `生成帧 0/${totalFrames}...`;
+  $('exportProgress').style.width = '0%';
+  const btnTrans = $('exportMovTransBtn'), btnBg = $('exportMovBgBtn');
+  btnTrans.disabled = true; btnBg.disabled = true;
+
+  try {
+    const t0 = performance.now();
+    const frames = [];
+    for (let f = 0; f < totalFrames; f++) {
+      const sec = f / fps;
+      renderFrameTo(ctx, w, h, sec, withBg);
+      const blob = await new Promise(r => off.toBlob(r, 'image/png'));
+      const buf = new Uint8Array(await blob.arrayBuffer());
+      frames.push(buf);
+      if (f % 3 === 0) {
+        $('exportProgress').style.width = (f / totalFrames * 80) + '%';
+        $('exportStatus').textContent = `生成帧 ${f}/${totalFrames}`;
+        await new Promise(r => setTimeout(r, 0));
+      }
+    }
+    $('exportStatus').textContent = '打包 MOV...';
+    $('exportProgress').style.width = '90%';
+    await new Promise(r => setTimeout(r, 0));
+
+    const movBytes = MOV.build(frames, w, h, fps);
+    const blob = new Blob([movBytes], { type: 'video/quicktime' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `highlight_${withBg ? 'bg' : 'alpha'}_${Date.now()}.mov`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    const t1 = performance.now();
+    const sizeMB = (blob.size / 1024 / 1024).toFixed(1);
+    $('exportStatus').textContent = `✓ MOV ${withBg ? '含背景' : '透明通道'} 导出完成：${sizeMB} MB · ${totalFrames} 帧 · 用时 ${((t1-t0)/1000).toFixed(1)}s`;
+    $('exportProgress').style.width = '100%';
+  } catch (err) {
+    $('exportStatus').textContent = '❌ 导出失败：' + err.message;
+    console.error(err);
+  } finally {
+    btnTrans.disabled = false; btnBg.disabled = false;
+  }
+}
+$('exportMovTransBtn').onclick = () => exportMOV(false);
+$('exportMovBgBtn').onclick = () => exportMOV(true);
+
+</script>
+</body>
+</html>
